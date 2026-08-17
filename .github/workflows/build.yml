@@ -194,10 +194,11 @@ jobs:
       # ==================== CVE-2026-43499 修复链 ====================
       - name: 应用 CVE 修复
         if: ${{ inputs.cve_2026_43499_patch }}
+        working-directory: build/repo/common
         run: |
-          ACTUAL_SUB=$(grep '^SUBLEVEL = ' build/repo/common/Makefile | awk '{print $3}')
-          bash third_party/security_patch/apply_cve_2026_43499.sh \
-            ${{ inputs.kernel_version }} "$ACTUAL_SUB" third_party/security_patch
+          ACTUAL_SUB=$(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')
+          bash $GITHUB_WORKSPACE/third_party/security_patch/apply_cve_2026_43499.sh \
+            ${{ inputs.kernel_version }} "$ACTUAL_SUB" $GITHUB_WORKSPACE/third_party/security_patch
           echo "CVE 修复完成 (SUBLEVEL=$ACTUAL_SUB)"
 
       # ==================== defconfig + fragment ====================
