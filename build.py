@@ -120,7 +120,7 @@ class Builder:
         repo_bin = ROOT / "third_party" / "git-repo" / "repo"
         if not repo_bin.exists():
             (ROOT / "third_party" / "git-repo").mkdir(parents=True, exist_ok=True)
-            run(f"curl -L https://storage.googleapis.com/git-repo-downloads/repo -o {repo_bin}", timeout=120)
+            run(f"curl -L https://storage.googleapis.com/git-repo-downloads/repo-2.16 -o {repo_bin}", timeout=120)
             repo_bin.chmod(0o755)
         self.REPO = str(repo_bin)
         Log.ok("环境就绪")
@@ -214,7 +214,7 @@ class Builder:
                         else "common-android15-6.6-2025-03")
             run(f"{self.REPO} init --depth=1 "
                 f"-u https://android.googlesource.com/kernel/manifest "
-                f"-b {m_branch}",
+                f"-b {m_branch} --repo-rev=v2.16",
                 cwd=kr, timeout=600)
             if base != "6.6.118":
                 # deprecated 分支: manifest 里 common revision 改 deprecated/ 前缀
