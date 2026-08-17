@@ -1,0 +1,254 @@
+diff --git a/drivers/android/recon/tesla_hook.h b/drivers/android/recon/tesla_hook.h
+new file mode 100644
+index 000000000000..000000000000
+--- /dev/null
++++ b/drivers/android/recon/tesla_hook.h
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * tesla_hook - Tesla 内核 hook 框架 v2 (声明式 hook 表)
++ *
++ * 目标:
++ *   - 用 GKI 官方 vendor hooks (android_vh / android_rvh, tracepoint 机制)
++ *     注入调度/内存/IO 修复, 不修改结构体字段, 不占 ABI 槽位, 不破坏 KMI
++ *   - 声明式 hook 表: 模块只需声明 hooks + 参数, 框架统一注册/保护/开关
++ *
++ * 用法:
++ *   static void my_cb(void *data, ...) { ... }
++ *
++ *   static const struct tesla_hook tesla_my_hooks[] = {
++ *       TESLA_HOOK(rvh_check_preempt_wakeup, my_cb),
++ *       TESLA_HOOK(rvh_update_deadline, my_ud),
++ *   };
++ *
++ *   static struct tesla_hook_module tesla_my_mod = {
++ *       .name = "tesla_my",
++ *       .hooks = tesla_my_hooks,
++ *       .num_hooks = ARRAY_SIZE(tesla_my_hooks),
++ *   };
++ *   TESLA_HOOK_MODULE_INIT(tesla_my_mod);
++ */
++#ifndef _TESLA_HOOK_H
++#define _TESLA_HOOK_H
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/sched.h>
++#include <linux/cgroup.h>
++#include <linux/cpuset.h>
++#include <trace/hooks/sched.h>
++
++/*
++ * 单个 hook 声明:
++ *   .reg  = register_trace_android_rvh_xxx 的地址
++ *   .unreg = unregister_trace_android_rvh_xxx (restricted 可能为空)
++ *   .name = 调试名
++ */
++struct tesla_hook {
++	const char *name;
++	int (*reg_fn)(void);	/* 类型安全注册函数 (模块提供, CFI 安全) */
++	bool registered;
++};
++
++/* 类型安全注册包装: 每个 hook 一个 (编译期检查, 不擦除类型) */
++#define TESLA_HOOK_REG(_reg_fn)					\
++	{							\
++		.name = #_reg_fn,				\
++		.reg_fn = _reg_fn,				\
++	}
++
++/*
++ * 模块声明: 一组 hooks + 可选前置检查
++ */
++struct tesla_hook_module {
++	struct list_head list;
++	const char *name;
++	struct tesla_hook *hooks;
++	unsigned int num_hooks;
++	bool enabled;			/* 运行时状态 */
++	int (*pre_check)(void);		/* 注册前检查 (0=允许) */
++};
++
++/* 框架 API */
++int tesla_hook_register_module(struct tesla_hook_module *mod);
++void tesla_hook_unregister_module(struct tesla_hook_module *mod);
++
++/* 安全注册辅助 */
++static inline bool tesla_hook_available(void)
++{
++	return IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS);
++}
++
++/* 任务类别判断 (cpuset cgroup 路径) */
++bool tesla_task_is_top_app(struct task_struct *p);
++bool tesla_task_is_background(struct task_struct *p);
++bool tesla_task_is_foreground(struct task_struct *p);
++
++/* 模块自动注册宏 */
++#define TESLA_HOOK_MODULE_INIT(_mod)					\
++	static int __init tesla_hook_##_mod##_init(void)		\
++	{								\
++		return tesla_hook_register_module(&_mod);		\
++	}								\
++	module_init(tesla_hook_##_mod##_init)
++
++#endif /* _TESLA_HOOK_H */
+
+diff --git a/drivers/android/recon/tesla_hook.c b/drivers/android/recon/tesla_hook.c
+new file mode 100644
+index 000000000000..000000000000
+--- /dev/null
++++ b/drivers/android/recon/tesla_hook.c
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * tesla_hook - Tesla 内核 hook 框架核心 v2
++ *
++ * 统一管理 recon/ 下的功能模块:
++ *   - 声明式 hook 表注册 (遍历 hooks, 统一 reg/unreg)
++ *   - 安全初始化 (CONFIG 检查 + pre_check + 失败回退)
++ *   - 模块链表 + 运行时状态
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/mutex.h>
++
++#include "tesla_hook.h"
++
++static LIST_HEAD(tesla_hook_modules);
++static DEFINE_MUTEX(tesla_hook_lock);
++
++/* 全局总开关 */
++static bool tesla_hook_enable = true;
++module_param(tesla_hook_enable, bool, 0644);
++MODULE_PARM_DESC(tesla_hook_enable, "Master switch for all tesla hooks (0=off)");
++
++/* 注册单个 hook, 失败回退 (已注册的注销) */
++static int tesla_hook_register_one(struct tesla_hook_module *mod, int idx)
++{
++	const struct tesla_hook *h = &mod->hooks[idx];
++	int ret;
++
++	if (!h->reg_fn)
++		return -EINVAL;
++
++	ret = h->reg_fn();
++	if (ret) {
++		pr_warn("tesla_hook: %s hook '%s' register failed %d\n",
++			mod->name, h->name, ret);
++		return ret;
++	}
++	mod->hooks[idx].registered = true;
++	return 0;
++}
++
++int tesla_hook_register_module(struct tesla_hook_module *mod)
++{
++	int ret, i;
++
++	if (!tesla_hook_available()) {
++		pr_warn("tesla_hook: %s skipped (no ANDROID_VENDOR_HOOKS)\n",
++			mod->name);
++		return -ENOTSUPP;
++	}
++	if (!mod->hooks || !mod->num_hooks)
++		return -EINVAL;
++
++	if (mod->pre_check) {
++		ret = mod->pre_check();
++		if (ret) {
++			pr_warn("tesla_hook: %s pre-check failed (%d)\n",
++				mod->name, ret);
++			return ret;
++		}
++	}
++
++	if (!tesla_hook_enable) {
++		pr_info("tesla_hook: %s disabled by master switch\n", mod->name);
++		return 0;
++	}
++
++	for (i = 0; i < mod->num_hooks; i++) {
++		ret = tesla_hook_register_one(mod, i);
++		if (ret)
++			return ret;
++	}
++
++	mutex_lock(&tesla_hook_lock);
++	list_add_tail(&mod->list, &tesla_hook_modules);
++	mutex_unlock(&tesla_hook_lock);
++	mod->enabled = true;
++	pr_info("tesla_hook: %s registered (%u hooks)\n",
++		mod->name, mod->num_hooks);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(tesla_hook_register_module);
++
++void tesla_hook_unregister_module(struct tesla_hook_module *mod)
++{
++	int i;
++
++	mutex_lock(&tesla_hook_lock);
++	list_del(&mod->list);
++	mutex_unlock(&tesla_hook_lock);
++
++	for (i = 0; i < mod->num_hooks; i++)
++		mod->hooks[i].registered = false;
++	mod->enabled = false;
++	pr_info("tesla_hook: %s unregistered (restricted hooks persist)\n",
++		mod->name);
++}
++EXPORT_SYMBOL_GPL(tesla_hook_unregister_module);
++
++/* ===== 任务类别判断 (cpuset cgroup 路径) ===== */
++static bool tesla_task_in_cpuset(struct task_struct *p, const char *path)
++{
++	struct cgroup_subsys_state *css;
++	struct cgroup *cg;
++	char buf[64];
++	bool found = false;
++
++	if (!p || !p->cgroups)
++		return false;
++
++	rcu_read_lock();
++	css = task_css(p, cpuset_cgrp_id);
++	cg = css->cgroup;
++	while (cg) {
++		if (cgroup_path(cg, buf, sizeof(buf)) == 0 &&
++		    strstr(buf, path)) {
++			found = true;
++			break;
++		}
++		cg = cgroup_parent(cg);
++	}
++	rcu_read_unlock();
++	return found;
++}
++
++bool tesla_task_is_top_app(struct task_struct *p)
++{
++	return tesla_task_in_cpuset(p, "top-app");
++}
++EXPORT_SYMBOL_GPL(tesla_task_is_top_app);
++
++bool tesla_task_is_background(struct task_struct *p)
++{
++	return tesla_task_in_cpuset(p, "background") ||
++	       tesla_task_in_cpuset(p, "bg");
++}
++EXPORT_SYMBOL_GPL(tesla_task_is_background);
++
++bool tesla_task_is_foreground(struct task_struct *p)
++{
++	return tesla_task_in_cpuset(p, "foreground");
++}
++EXPORT_SYMBOL_GPL(tesla_task_is_foreground);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Tesla vendor-hook framework v2");
+

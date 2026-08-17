@@ -1,0 +1,53 @@
+From cfd68476b281983f6b0040487b40ad0811dfc68f Mon Sep 17 00:00:00 2001
+From: epicmann24 <nickypearson862000@gmail.com>
+Date: Sun, 3 Aug 2025 14:43:09 +0800
+Subject: [PATCH] Use copy_page in uksm, zram_drv and kernel/power/swap.c
+
+Using copy_page rather than memcpy is beneficial because arm64 has
+an assembly written copy_page function. Therefore using the dedicated
+copy_page function can reduce overhead and improve performance.
+---
+ drivers/block/zram/zram_drv.c | 2 +-
+ kernel/power/swap.c           | 2 +-
+ mm/uksm.c                     | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 82f97ccd535fb..29f28df35e793 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -1372,7 +1372,7 @@ static int zram_read_from_zspool(struct zram *zram, struct page *page,
+ 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+ 	if (size == PAGE_SIZE) {
+ 		dst = kmap_atomic(page);
+-		memcpy(dst, src, PAGE_SIZE);
++		copy_page(dst, src);
+ 		kunmap_atomic(dst);
+ 		ret = 0;
+ 	} else {
+diff --git a/kernel/power/swap.c b/kernel/power/swap.c
+index b1896346fde15..31ea1ef79e2ea 100644
+--- a/kernel/power/swap.c
++++ b/kernel/power/swap.c
+@@ -840,7 +840,7 @@ static int save_image_lzo(struct swap_map_handle *handle,
+ 			for (off = 0;
+ 			     off < LZO_HEADER + data[thr].cmp_len;
+ 			     off += PAGE_SIZE) {
+-				memcpy(page, data[thr].cmp + off, PAGE_SIZE);
++				copy_page(page, data[thr].cmp + off);
+ 
+ 				ret = swap_write_page(handle, page, &hb);
+ 				if (ret)
+diff --git a/mm/uksm.c b/mm/uksm.c
+index 5d14d0f2ac787..9fa95a01e65fc 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -5519,7 +5519,7 @@ static inline int cal_positive_negative_costs(void)
+ 	addr1 = kmap_atomic(p1);
+ 	addr2 = kmap_atomic(p2);
+ 	memset(addr1, get_random_u32(), PAGE_SIZE);
+-	memcpy(addr2, addr1, PAGE_SIZE);
++	copy_page(addr2, addr1);
+ 
+ 	/* make sure that the two pages differ in last byte */
+ 	addr2[PAGE_SIZE-1] = ~addr2[PAGE_SIZE-1];

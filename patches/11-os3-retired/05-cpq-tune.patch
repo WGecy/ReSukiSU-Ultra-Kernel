@@ -1,0 +1,189 @@
+diff --git a/block/elevator.c b/block/elevator.c
+index ba072d8f660e..308b3bd4bb8e 100644
+--- a/block/elevator.c
++++ b/block/elevator.c
+@@ -113,7 +113,7 @@ static struct elevator_type *__elevator_find(const char *name)
+ 	return NULL;
+ }
+ 
+-static struct elevator_type *elevator_find_get(struct request_queue *q,
++struct elevator_type *elevator_find_get(struct request_queue *q,
+ 		const char *name)
+ {
+ 	struct elevator_type *e;
+@@ -125,6 +125,7 @@ static struct elevator_type *elevator_find_get(struct request_queue *q,
+ 	spin_unlock(&elv_list_lock);
+ 	return e;
+ }
++EXPORT_SYMBOL(elevator_find_get);
+ 
+ static const struct kobj_type elv_ktype;
+ 
+@@ -693,6 +694,7 @@ int elevator_switch(struct request_queue *q, struct elevator_type *new_e)
+ 
+ 	return ret;
+ }
++EXPORT_SYMBOL(elevator_switch);
+ 
+ void elevator_disable(struct request_queue *q)
+ {
+diff --git a/block/tesla_cpq_tune.c b/block/tesla_cpq_tune.c
+new file mode 100644
+index 000000000000..000000000000
+--- /dev/null
++++ b/block/tesla_cpq_tune.c
+@@ -0,0 +1,154 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * T-677 内核态调度器调优
++ * 直接调用调度器 elevator_attrs 的 store 函数设置参数,
++ * 绕过 SELinux 对 /sys 写权限的拦截.
++ *
++ * USE_ADIOS=on 构建时 (CONFIG_MQ_IOSCHED_ADIOS): 切换到 ADIOS 并调参;
++ * 否则: 切换到厂商 cpq (cpq.ko) 并调参.
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/blkdev.h>
++#include <linux/fs.h>
++#include "elevator.h"
++
++extern struct elevator_type *elevator_find_get(struct request_queue *q,
++					       const char *name);
++extern int elevator_switch(struct request_queue *q,
++			   struct elevator_type *new_e);
++
++struct tesla_param {
++	const char *name;
++	unsigned int val;
++};
++
++static void tesla_set_param(struct request_queue *q,
++			   struct elevator_type *e, const char *name,
++			   unsigned int val)
++{
++	struct elv_fs_entry *attr;
++	char buf[16];
++	int len;
++
++	if (!e || !e->elevator_attrs)
++		return;
++
++	for (attr = e->elevator_attrs; attr->attr.name; attr++) {
++		if (strcmp(attr->attr.name, name))
++			continue;
++		len = snprintf(buf, sizeof(buf), "%u\n", val);
++		mutex_lock(&q->elevator->sysfs_lock);
++		attr->store(q->elevator, buf, len);
++		mutex_unlock(&q->elevator->sysfs_lock);
++		pr_info("tesla: %s %s = %u\n", e->elevator_name, name, val);
++		return;
++	}
++	pr_info("tesla: attr %s not found for %s, skip\n", name,
++		e->elevator_name);
++}
++
++static void tesla_tune_device(const char *dev)
++{
++	struct block_device *bdev;
++	struct request_queue *q;
++	struct elevator_type *e;
++	char path[64];
++	int i, ret;
++
++	snprintf(path, sizeof(path), "/dev/block/%s", dev);
++
++	bdev = blkdev_get_by_path(path, FMODE_READ, NULL, NULL);
++	if (IS_ERR(bdev))
++		return;
++	q = bdev->bd_disk->queue;
++	if (!q) {
++		blkdev_put(bdev, NULL);
++		return;
++	}
++
++#if IS_ENABLED(CONFIG_MQ_IOSCHED_ADIOS)
++	e = elevator_find_get(q, "adios");
++	if (e) {
++		mutex_lock(&q->sysfs_lock);
++		ret = elevator_switch(q, e);
++		if (!ret)
++			tesla_set_param(q, e, "global_latency_window", 4000000);
++		mutex_unlock(&q->sysfs_lock);
++		elevator_put(e);
++		if (ret) {
++			pr_warn("tesla: %s failed to switch to adios: %d\n",
++				dev, ret);
++			goto out;
++		}
++		pr_info("tesla: %s switched to adios\n", dev);
++		goto out;
++	}
++#endif
++	e = elevator_find_get(q, "cpq");
++	if (e) {
++		static const struct tesla_param cpq_params[] = {
++			{ "read_expire",	4 },
++			{ "write_expire",	8 },
++			{ "back_timeout",	200 },
++			{ "async_depth",	126 },
++			{ "writes_starved",	1 },
++			{ "slice_idle",		0 },
++		};
++		mutex_lock(&q->sysfs_lock);
++		ret = elevator_switch(q, e);
++		if (!ret)
++			for (i = 0; i < ARRAY_SIZE(cpq_params); i++)
++				tesla_set_param(q, e, cpq_params[i].name,
++						cpq_params[i].val);
++		mutex_unlock(&q->sysfs_lock);
++		elevator_put(e);
++		if (ret) {
++			pr_warn("tesla: %s failed to switch to cpq: %d\n",
++				dev, ret);
++			goto out;
++		}
++		pr_info("tesla: %s switched to cpq (tuned)\n", dev);
++	} else {
++		pr_info("tesla: no cpq/adios found on %s\n", dev);
++	}
++out:
++	blkdev_put(bdev, NULL);
++}
++
++static void tesla_work(struct work_struct *work);
++static DECLARE_DELAYED_WORK(tesla_work_item, tesla_work);
++
++/* MGLRU: Android 启动时关成 0, 这里重新启用 (anon+file+swapout) */
++extern void lru_gen_change_state(bool enabled);
++extern struct static_key_false lru_gen_caps[];
++
++static void tesla_enable_lru_gen(void)
++{
++	/* 内核 API 直接启用, 绕 SELinux sysfs 拦截 (-EACCES) */
++	lru_gen_change_state(true);
++	static_branch_enable(&lru_gen_caps[LRU_GEN_MM_WALK]);
++	pr_info("tesla: lru_gen (MGLRU) enabled\n");
++}
++
++static void tesla_work(struct work_struct *work)
++{
++	static const char *devs[] = { "sda", "sdb", "sdc" };
++	int i;
++
++	tesla_enable_lru_gen();
++	for (i = 0; i < ARRAY_SIZE(devs); i++)
++		tesla_tune_device(devs[i]);
++}
++
++static int __init tesla_cpq_tune_init(void)
++{
++	/* 延迟 5s: 等厂商 cpq.ko 完成注册 (init 0.4s 加载) */
++	schedule_delayed_work(&tesla_work_item, 5 * HZ);
++	return 0;
++}
++late_initcall(tesla_cpq_tune_init);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("T-677 kernel IO scheduler tuning");

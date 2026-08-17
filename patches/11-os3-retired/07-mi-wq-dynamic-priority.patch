@@ -1,0 +1,466 @@
+diff --git a/drivers/android/recon/Makefile b/drivers/android/recon/Makefile
+index ef3c6f5..2bbaf81 100644
+--- a/drivers/android/recon/Makefile
++++ b/drivers/android/recon/Makefile
+@@ -3,3 +3,4 @@ obj-y += kshrink_slabd.o
+ obj-y += tesla_guard.o
+ obj-y += tesla_hook.o
+ obj-y += dynamic_readahead.o
++obj-y += mi_wq_dynamic_priority.o
+diff --git a/drivers/android/recon/mi_wq_dynamic_priority.c b/drivers/android/recon/mi_wq_dynamic_priority.c
+new file mode 100644
+index 0000000..51e270e
+--- /dev/null
++++ b/drivers/android/recon/mi_wq_dynamic_priority.c
+@@ -0,0 +1,451 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * mi_wq_dynamic_priority - 小米 mi_wq_dynamic_priority.ko 6.6 移植 (反汇编逐行还原)
++ *
++ * 逆向来源: 6.12.69-android16-6-maybe-dirty-4k mi_wq_dynamic_priority.ko
++ * 反汇编: /tmp/opencode/wq.dis  (逐函数对照, 不猜测)
++ *
++ * ================= 6.12 语义还原 (逐函数) =================
++ *
++ * [数据布局]
++ *   .bss+0: enable 标志 (初始 0=启用; 写 1 → 置 0 = 启用; 写 0 → 置 1 = 关闭;
++ *            注册失败时置 1 = 关闭)
++ *   .bss+8: mikblockd_wq 指针 (init 自建 workqueue)
++ *
++ * [sfi_delay_run_hw_queue]  (hook: android_vh_blk_mq_delay_run_hw_queue)
++ *   参数: data, cpu, hctx, delay, skip
++ *   - delay != 0            → *skip=false, return        (不拦截非零延迟)
++ *   - enable(bit0) == 1     → *skip=false, return        (模块关闭)
++ *   - mikblockd_wq == NULL  → *skip=false, return
++ *   - preempt_count & 0xff0100 → *skip=false, return
++ *     (arm64 thread_info.preempt_count; 0xff0100 =
++ *      SOFTIRQ_OFFSET(0x100)|HARDIRQ_MASK(0xf0000)|NMI_MASK(0xf00000)
++ *      = 中断/softirq/NMI 上下文不处理)
++ *   - metis 4 查 (mi_vip_task / mi_link_vip_task / mi_ui_task / mi_render_task):
++ *       任一为真 → background cgroup 检查:
++ *         非 background → 走 queue_work_on
++ *         background   → 走 prio 检查
++ *       全为假 → 走 prio 检查
++ *   - prio 检查: current->prio > 99 → *skip=false; ≤99 → queue_work_on
++ *     (6.12 反汇编 [x19,#0x94] 与 0x63 比较; 6.6 等价 current->prio <= MAX_RT_PRIO-1)
++ *   - queue_work_on(WORK_CPU_UNBOUND, mikblockd_wq, &hctx->run_work) → *skip = ret&1
++ *
++ * [sfi_kick_requeue_list]  (hook: android_vh_blk_mq_kick_requeue_list)
++ *   同上, work 为 &q->requeue_work (6.12 反汇编 q+0x280; 6.6 用字段)
++ *
++ * [sfi_create_worker]  (hook: android_rvh_create_worker, restricted)
++ *   参数: data, p, attrs
++ *   attrs->nice == -1000 → sched_set_fifo_low(p); set_user_nice(p, -20)
++ *   (6.12 反汇编 [x2]==-1000; workqueue_attrs 首字段即 nice)
++ *
++ * [sfi_alloc_and_link_pwqs]  (hook: android_rvh_alloc_and_link_pwqs, restricted)
++ *   参数: data, wq, ret, skip
++ *   wq==NULL 或不在 pending 集合 → *skip=false
++ *   pending 命中 (带 0x4000 私有标记): attrs=alloc_workqueue_attrs();
++ *           attrs->nice=-1000; *ret=apply_workqueue_attrs(wq, attrs);
++ *           *skip=true; free(attrs)
++ *   失败: 打印 "sfi_v3: alloc_workqueue_attrs failed", *skip=false
++ *   (6.12 用 wq->flags&0x4000 判断; 6.6 workqueue_struct 不透明, 且 hook 触发时
++ *    mikblockd_wq 尚未赋值 → 用 alloc_workqueue hook 预记 pending 集合, 见下)
++ *
++ * [sfi_alloc_workqueue]  (hook: android_rvh_alloc_workqueue, restricted)
++ *   参数: data, wq, flags, max_active (workqueue.c:4765, wq->flags 赋值前,
++ *   透出真实 wq 指针 + 改写后 flags)
++ *   *flags 含私有标记位(0x4000) → 把 wq 记入 pending 集合 (spinlock 保护,
++ *   上限 8); alloc_and_link_pwqs (4643, 紧随其后) 同步消费。
++ *   覆盖 {kverityd(0x401a), loop(0x4006), mikblockd(0x401a)} 与 6.12 一致。
++ *   调用点在 workqueue.c:4765 (vsnprintf 填 name 后, wq->flags 赋值前)
++ *   6.12 反汇编 0x5c0-0x62c 逐分支:
++ *     strncmp(name, "kverityd", 8)==0:
++ *       flags!=0x401a → flags=0x401a
++ *       (flags==0x401a 且 name=="loop" 的死分支省略, 恒不可达)
++ *     else strncmp(name, "loop", 4)==0:
++ *       flags!=0x4006 → flags=0x4006
++ *   其他: 不改
++ *   (0x401a = WQ_UNBOUND|WQ_HIGHPRI|WQ_MEM_RECLAIM|0x4000私有位
++ *    0x4006 = WQ_UNBOUND|WQ_FREEZABLE|0x4000私有位)
++ *
++ * [proc /proc/mikblockd_enable]
++ *   show: 打印 !enable (enable=0→显示1=启用; enable=1→显示0=关闭)
++ *   write: 写 "1" → enable=0 (启用); 写 非1 → enable=1 (关闭)
++ *   open: single_open
++ *
++ * [init]
++ *   注册 5 hooks (2 普通 tracepoint + 3 rvh restricted);
++ *   任一失败 → enable=1(禁用态) + 回滚已注册普通 hooks
++ *   proc_create("mikblockd_enable", 0664, NULL, &fops) 失败 → enable=1
++ *   alloc_workqueue("mikblockd", 0x401a, 0) 失败 → enable=1 + 清理
++ *
++ * [exit]
++ *   注销 2 个普通 hooks (restricted 不可注销);
++ *   remove_proc_entry; destroy_workqueue
++ *
++ * ================= 6.6 适配 (有据可查, 非猜测) =================
++ *   - metis 符号 (mi_vip_task 等) 在 6.6 不存在且原厂 metis 未导出
++ *     (kallsyms 't' 无 EXPORT) → 剥离, 用 cgroup 前台任务判断近似
++ *   - apply_workqueue_attrs_locked 6.6 未导出 → apply_workqueue_attrs
++ *   - 0x4000 私有位 6.6 未定义 → 用 1U<<14 (6.6 无冲突; 检查过 workqueue.h)
++ *   - 6.6 cgroup 名判断: task_css(current, cpuset_cgrp_id)->cgroup->kn->name
++ *   - WORK_CPU_UNBOUND = NR_CPUS(32) 与 6.12 反汇编 w0=32 一致
++ *   - kprobe alloc_workqueue → android_rvh_alloc_workqueue hook (6.6 调用点存在,
++ *     免 kprobe, 类型安全)
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/string.h>
++#include <linux/sched.h>
++#include <linux/workqueue.h>
++#include <linux/seq_file.h>
++#include <linux/proc_fs.h>
++#include <linux/preempt.h>
++#include <linux/kprobes.h>
++#include <linux/uaccess.h>
++#include <linux/blk-mq.h>
++#include <linux/cpu.h>
++#include <trace/hooks/blk.h>
++#include <trace/hooks/wqlockup.h>
++
++#include "tesla_hook.h"
++
++#define MIKBLOCKD_PRIV_FLAG	(1U << 14)
++#define MIKBLOCKD_WQ_FLAGS	(WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM | MIKBLOCKD_PRIV_FLAG)
++#define MIKBLOCKD_LOOP_FLAGS	(WQ_UNBOUND | WQ_FREEZABLE | MIKBLOCKD_PRIV_FLAG)
++
++static struct workqueue_struct *mikblockd_wq;
++/* enable: 0=启用(默认), 1=关闭; 与 6.12 .data+0 一致 */
++static bool mikblockd_enable;
++
++/* 前台重要任务 (剥离 metis 的近似: metis 特殊任务 ≈ top-app/foreground) */
++static bool sfi_task_important(void)
++{
++	return tesla_task_is_top_app(current) ||
++	       tesla_task_is_foreground(current);
++}
++
++/*
++ * 门控: 前台任务 && 非后台 → 提升; 其余 → RT 任务提升
++ * OS4 (6.6.57) 用 xr_qi 的 get_task_qos_lvl(current)∈{1,2} (QoS≥6) 替代 metis,
++ * 并删除 cgroup background 例外. 我们无 xr_qi, 用 cgroup top-app/foreground
++ * 近似 QoS 高等级; 保留 background 守卫更安全 (后台任务不提升).
++ */
++static bool sfi_should_boost(void)
++{
++	if (sfi_task_important() && !tesla_task_is_background(current))
++		return true;
++	return current->prio <= MAX_RT_PRIO - 1;
++}
++
++/* 中断上下文跳过: 6.12 反汇编 [x19,#0x10] tst #0xff0100
++ * = arm64 thread_info.preempt_count & (SOFTIRQ_OFFSET|HARDIRQ_MASK|NMI_MASK)
++ * (6.6 同布局: thread_info {flags@0x0, ttbr0@0x8, preempt_count@0x10}) */
++static bool sfi_in_interrupt(void)
++{
++	return preempt_count() & (SOFTIRQ_OFFSET | HARDIRQ_MASK | NMI_MASK);
++}
++
++static void sfi_delay_run_hw_queue(void *data, int cpu,
++				   struct blk_mq_hw_ctx *hctx,
++				   unsigned long delay, bool *skip)
++{
++	*skip = false;
++
++	if (delay != 0 || mikblockd_enable || !mikblockd_wq)
++		return;
++	if (sfi_in_interrupt())
++		return;
++	if (!sfi_should_boost())
++		return;
++
++	*skip = queue_work_on(WORK_CPU_UNBOUND, mikblockd_wq,
++			      &hctx->run_work.work);
++}
++
++static void sfi_kick_requeue_list(void *data, struct request_queue *q,
++				  unsigned long delay, bool *skip)
++{
++	*skip = false;
++
++	if (delay != 0 || mikblockd_enable || !mikblockd_wq)
++		return;
++	if (sfi_in_interrupt())
++		return;
++	if (!sfi_should_boost())
++		return;
++
++	*skip = queue_work_on(WORK_CPU_UNBOUND, mikblockd_wq,
++			      &q->requeue_work.work);
++}
++
++static void sfi_create_worker(void *data, struct task_struct *p,
++			      struct workqueue_attrs *attrs)
++{
++	if (attrs && attrs->nice == -1000) {
++		sched_set_fifo_low(p);
++		set_user_nice(p, -20);
++	}
++}
++
++/*
++ * 6.12: wq->flags & 0x4000 → apply attrs(nice=-1000)。
++ * 6.6: workqueue_struct 不透明, 无法读 wq->flags; 且 alloc_workqueue 内部同步
++ * 触发 alloc_and_link_pwqs hook 时 mikblockd_wq 尚未赋值 → 指针比较有顺序 bug。
++ * 子代理审计 (2026-08-13) 最终方案:
++ *   android_rvh_alloc_workqueue hook (workqueue.c:4765, 在 wq->flags 赋值前,
++ *   透出真实 wq 指针 + 改写后 flags) 把带私有标记位的 wq 记入 pending 集合;
++ *   sfi_alloc_and_link_pwqs (workqueue.c:4643, 紧随其后) 从集合消费 → 同步、
++ *   无竞争、全覆盖 {kverityd(0x401a), loop(0x4006), mikblockd(0x401a)}。
++ */
++static struct workqueue_struct *sfi_pending_wqs[8];
++static int sfi_pending_nr;
++static DEFINE_SPINLOCK(sfi_pending_lock);
++
++static void sfi_alloc_workqueue(void *data, struct workqueue_struct *wq,
++				unsigned int *flags, int *max_active)
++{
++	unsigned long irqflags;
++
++	if (!flags || !(*flags & MIKBLOCKD_PRIV_FLAG))
++		return;
++
++	spin_lock_irqsave(&sfi_pending_lock, irqflags);
++	if (sfi_pending_nr < ARRAY_SIZE(sfi_pending_wqs))
++		sfi_pending_wqs[sfi_pending_nr++] = wq;
++	spin_unlock_irqrestore(&sfi_pending_lock, irqflags);
++}
++
++static void sfi_alloc_and_link_pwqs(void *data, struct workqueue_struct *wq,
++				    int *ret, bool *skip)
++{
++	struct workqueue_attrs *attrs;
++	unsigned long irqflags;
++	bool found = false;
++	int i;
++
++	*skip = false;
++	if (!wq)
++		return;
++
++	spin_lock_irqsave(&sfi_pending_lock, irqflags);
++	for (i = 0; i < sfi_pending_nr; i++) {
++		if (sfi_pending_wqs[i] == wq) {
++			sfi_pending_wqs[i] = sfi_pending_wqs[--sfi_pending_nr];
++			found = true;
++			break;
++		}
++	}
++	spin_unlock_irqrestore(&sfi_pending_lock, irqflags);
++
++	if (!found)
++		return;
++
++	attrs = alloc_workqueue_attrs();
++	if (!attrs) {
++		pr_err("mi_wq: sfi_v3: alloc_workqueue_attrs failed\n");
++		return;
++	}
++	attrs->nice = -1000;
++	/*
++	 * OS4 (6.6.57) 反汇编: apply_workqueue_attrs 由 cpus_read_lock/unlock 包裹.
++	 * 6.6 契约 (workqueue.c:4572): "Assumes caller has CPU hotplug read
++	 * exclusion, i.e. cpus_read_lock()" + lockdep_assert_cpus_held().
++	 * hook 调用点 (workqueue.c:4643) 在内核自身取锁之前 → 此处取锁无嵌套死锁.
++	 */
++	cpus_read_lock();
++	*ret = apply_workqueue_attrs(wq, attrs);
++	cpus_read_unlock();
++	*skip = true;
++	free_workqueue_attrs(attrs);
++}
++
++/*
++ * alloc_workqueue flags 定制 (逐分支对照 6.12 反汇编 0x5c0-0x62c):
++ *   kprobe 读 regs[0]=fmt(name), regs[1]=flags, 与 6.12 原版 kprobe 完全一致
++ *   (6.6 struct workqueue_struct 不透明, hook 拿不到 name; kprobe 无此限制)
++ *   kverityd → flags=0x401a; loop → flags=0x4006 (flags 已等则不变)
++ */
++static int handler_alloc_workqueue_pre(struct kprobe *kp, struct pt_regs *regs)
++{
++	const char *name = (const char *)regs->regs[0];
++	unsigned int flags = regs->regs[1];
++
++	if (!name)
++		return 0;
++
++	if (strncmp(name, "kverityd", 8) == 0) {
++		if (flags != MIKBLOCKD_WQ_FLAGS)
++			regs->regs[1] = MIKBLOCKD_WQ_FLAGS;
++	} else if (strncmp(name, "loop", 4) == 0) {
++		if (flags != MIKBLOCKD_LOOP_FLAGS)
++			regs->regs[1] = MIKBLOCKD_LOOP_FLAGS;
++	}
++	return 0;
++}
++
++static struct kprobe kp_alloc_workqueue = {
++	.symbol_name = "alloc_workqueue",
++	.pre_handler = handler_alloc_workqueue_pre,
++};
++
++/* ===== proc: /proc/mikblockd_enable (正逻辑, 与反汇编一致) ===== */
++static int mikblockd_enable_show(struct seq_file *m, void *v)
++{
++	/* 6.12 反汇编 0x554: m==NULL → printk + -EINVAL */
++	if (!m)
++		return -EINVAL;
++
++	seq_printf(m, "%d\n", !mikblockd_enable);
++	return 0;
++}
++
++static ssize_t mikblockd_enable_write(struct file *file,
++				      const char __user *buf,
++				      size_t len, loff_t *ppos)
++{
++	char kbuf[64];
++	unsigned long long val;
++	int ret;
++
++	if (len == 0 || len >= sizeof(kbuf))
++		return -EINVAL;
++	if (copy_from_user(kbuf, buf, len))
++		return -EFAULT;
++	kbuf[len] = '\0';
++
++	ret = kstrtoull(kbuf, 10, &val);
++	if (ret)
++		return ret;
++
++	/* 反汇编 0x4a8-0x4d4: val==1 → enable=0(启用); val!=1 → enable=1(关闭) */
++	mikblockd_enable = (val != 1);
++	return len;
++}
++
++static int mikblockd_enable_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mikblockd_enable_show, NULL);
++}
++
++static const struct proc_ops mikblockd_enable_fops = {
++	.proc_open = mikblockd_enable_open,
++	.proc_read = seq_read,
++	.proc_write = mikblockd_enable_write,
++	.proc_lseek = seq_lseek,
++	.proc_release = single_release,
++};
++
++static int __init mi_wq_dynamic_priority_init(void)
++{
++	int ret;
++
++	/*
++	 * 6.12 原版 init 语义: 任一注册失败 → enable=1(禁用态) + 回滚已注册项,
++	 * proc/wq/kprobe 创建失败同样禁用. kprobe 与 6.12 原版一致.
++	 */
++	ret = register_trace_android_vh_blk_mq_delay_run_hw_queue(
++			sfi_delay_run_hw_queue, NULL);
++	if (ret) {
++		pr_err("mi_wq: register_trace_android_vh_blk_mq_delay_run_hw_queue failed! ret=%d\n",
++		       ret);
++		mikblockd_enable = true;
++		return 0;
++	}
++
++	ret = register_trace_android_vh_blk_mq_kick_requeue_list(
++			sfi_kick_requeue_list, NULL);
++	if (ret) {
++		pr_err("mi_wq: register_trace_android_vh_blk_mq_kick_requeue_list failed! ret=%d\n",
++		       ret);
++		mikblockd_enable = true;
++		unregister_trace_android_vh_blk_mq_delay_run_hw_queue(
++				sfi_delay_run_hw_queue, NULL);
++		return 0;
++	}
++
++	ret = register_trace_android_rvh_create_worker(sfi_create_worker, NULL);
++	if (ret) {
++		pr_err("mi_wq: register_trace_android_rvh_create_worker failed! ret=%d\n",
++		       ret);
++		mikblockd_enable = true;
++		unregister_trace_android_vh_blk_mq_delay_run_hw_queue(
++				sfi_delay_run_hw_queue, NULL);
++		unregister_trace_android_vh_blk_mq_kick_requeue_list(
++				sfi_kick_requeue_list, NULL);
++		return 0;
++	}
++
++	ret = register_trace_android_rvh_alloc_and_link_pwqs(
++			sfi_alloc_and_link_pwqs, NULL);
++	if (ret) {
++		pr_err("mi_wq: register_trace_android_rvh_alloc_and_link_pwqs failed! ret=%d\n",
++		       ret);
++		mikblockd_enable = true;
++		unregister_trace_android_vh_blk_mq_delay_run_hw_queue(
++				sfi_delay_run_hw_queue, NULL);
++		unregister_trace_android_vh_blk_mq_kick_requeue_list(
++				sfi_kick_requeue_list, NULL);
++		return 0;
++	}
++
++	ret = register_trace_android_rvh_alloc_workqueue(sfi_alloc_workqueue, NULL);
++	if (ret) {
++		pr_err("mi_wq: register_trace_android_rvh_alloc_workqueue failed! ret=%d\n",
++		       ret);
++		mikblockd_enable = true;
++		return 0;
++	}
++
++	ret = register_kprobe(&kp_alloc_workqueue);
++	if (ret) {
++		pr_err("mi_wq: register_kprobe alloc_workqueue failed, returned %d\n",
++		       ret);
++		mikblockd_enable = true;
++		return 0;
++	}
++
++	if (!proc_create("mikblockd_enable", 0664, NULL,
++			 &mikblockd_enable_fops)) {
++		pr_err("mi_wq: fail to create file node\n");
++		mikblockd_enable = true;
++		return 0;
++	}
++
++	mikblockd_wq = alloc_workqueue("mikblockd", MIKBLOCKD_WQ_FLAGS, 0);
++	if (!mikblockd_wq) {
++		pr_err("mi_wq: alloc_workqueue fail!\n");
++		mikblockd_enable = true;
++		remove_proc_entry("mikblockd_enable", NULL);
++		return 0;
++	}
++
++	/* OS4 init 尾部: try_module_get 防卸载 (restricted hooks 不可注销,
++	 * 卸载会留悬空 probe → UAF) */
++	try_module_get(&THIS_MODULE);
++
++	pr_info("mi_wq: module init done\n");
++	return 0;
++}
++
++static void __exit mi_wq_dynamic_priority_exit(void)
++{
++	/* OS4 cleanup: 先关标志 → 注销普通 hooks → unregister_kprobe →
++	 * synchronize_rcu (等 kprobe 处理完) → remove_proc → destroy_wq */
++	mikblockd_enable = true;
++	unregister_trace_android_vh_blk_mq_delay_run_hw_queue(
++			sfi_delay_run_hw_queue, NULL);
++	unregister_trace_android_vh_blk_mq_kick_requeue_list(
++			sfi_kick_requeue_list, NULL);
++	/* android_rvh_create_worker / alloc_and_link_pwqs 为 restricted, 不可注销 */
++	unregister_kprobe(&kp_alloc_workqueue);
++	synchronize_rcu();
++	remove_proc_entry("mikblockd_enable", NULL);
++	if (mikblockd_wq) {
++		destroy_workqueue(mikblockd_wq);
++		mikblockd_wq = NULL;
++	}
++}
++
++module_init(mi_wq_dynamic_priority_init);
++module_exit(mi_wq_dynamic_priority_exit);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("mi workqueue dynamic priority (ported from Xiaomi 6.12 ko)");

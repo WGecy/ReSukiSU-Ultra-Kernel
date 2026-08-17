@@ -1,0 +1,88 @@
+diff --git a/drivers/cpufreq/cpufreq_conservative.c b/drivers/cpufreq/cpufreq_conservative.c
+index b6bd0ff35323..9023a6b4a5f8 100644
+--- a/drivers/cpufreq/cpufreq_conservative.c
++++ b/drivers/cpufreq/cpufreq_conservative.c
+@@ -152,7 +152,7 @@ static ssize_t sampling_down_factor_store(struct gov_attr_set *attr_set,
+ 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
+ 	unsigned int input;
+ 	int ret;
+-	ret = sscanf(buf, "%u", &input);
++	ret = kstrtouint(buf, 0, &input);
+
+ 	if (ret < 0 || input > MAX_SAMPLING_DOWN_FACTOR || input < 1)
+ 		return -EINVAL;
+@@ -168,7 +168,7 @@ static ssize_t up_threshold_store(struct gov_attr_set *attr_set,
+ 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
+ 	unsigned int input;
+ 	int ret;
+-	ret = sscanf(buf, "%u", &input);
++	ret = kstrtouint(buf, 0, &input);
+ 
+ 	if (ret < 0 || input > 100 || input <= cs_tuners->down_threshold)
+ 		return -EINVAL;
+@@ -184,7 +184,7 @@ static ssize_t down_threshold_store(struct gov_attr_set *attr_set,
+ 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
+ 	unsigned int input;
+ 	int ret;
+-	ret = sscanf(buf, "%u", &input);
++	ret = kstrtouint(buf, 0, &input);
+ 
+ 	/* cannot be lower than 1 otherwise freq will not fall */
+ 	if (ret < 0 || input < 1 || input > 100 ||
+@@ -202,7 +202,7 @@ static ssize_t ignore_nice_load_store(struct gov_attr_set *attr_set,
+ 	unsigned int input;
+ 	int ret;
+ 
+-	ret = sscanf(buf, "%u", &input);
++	ret = kstrtouint(buf, 0, &input);
+ 	if (ret < 0)
+ 		return -EINVAL;
+ 
+@@ -227,7 +227,7 @@ static ssize_t freq_step_store(struct gov_attr_set *attr_set, const char *buf,
+ 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
+ 	unsigned int input;
+ 	int ret;
+-	ret = sscanf(buf, "%u", &input);
++	ret = kstrtouint(buf, 0, &input);
+
+ 	if (ret < 0)
+ 		return -EINVAL;
+diff --git a/drivers/cpufreq/qcom-cpufreq-hw.c b/drivers/cpufreq/qcom-cpufreq-hw.c
+index 92c0fc4a3cf6..bcf88dd0b1d0 100644
+--- a/drivers/cpufreq/qcom-cpufreq-hw.c
++++ b/drivers/cpufreq/qcom-cpufreq-hw.c
+@@ -305,7 +305,7 @@ static void qcom_get_related_cpus(int index, struct cpumask *m)
+ 	struct of_phandle_args args;
+ 	int cpu, ret;
+ 
+-	for_each_possible_cpu(cpu) {
++	for_each_present_cpu(cpu) {
+ 		cpu_np = of_cpu_device_node_get(cpu);
+ 		if (!cpu_np)
+ 			continue;
+diff --git a/drivers/cpuidle/cpuidle-arm.c b/drivers/cpuidle/cpuidle-arm.c
+index 7cfb980a357d..962d0091e2d6 100644
+--- a/drivers/cpuidle/cpuidle-arm.c
++++ b/drivers/cpuidle/cpuidle-arm.c
+@@ -147,7 +147,7 @@ static int __init arm_idle_init(void)
+ 	struct cpuidle_driver *drv;
+ 	struct cpuidle_device *dev;
+ 
+-	for_each_possible_cpu(cpu) {
++	for_each_present_cpu(cpu) {
+ 		ret = arm_idle_init_cpu(cpu);
+ 		if (ret)
+ 			goto out_fail;
+diff --git a/drivers/cpuidle/cpuidle-qcom-spm.c b/drivers/cpuidle/cpuidle-qcom-spm.c
+index b6b06a510fd8..2998b7e8b7db 100644
+--- a/drivers/cpuidle/cpuidle-qcom-spm.c
++++ b/drivers/cpuidle/cpuidle-qcom-spm.c
+@@ -138,7 +138,7 @@ static int spm_cpuidle_drv_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return dev_err_probe(&pdev->dev, ret, "set warm boot addr failed");
+ 
+-	for_each_possible_cpu(cpu) {
++	for_each_present_cpu(cpu) {
+ 		ret = spm_cpuidle_register(&pdev->dev, cpu);
+ 		if (ret && ret != -ENODEV) {
+ 			dev_err(&pdev->dev,

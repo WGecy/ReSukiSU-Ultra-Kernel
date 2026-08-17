@@ -1,0 +1,111 @@
+From b7b4b81b56cc07df1f8cd328e0cc1971b64b368d Mon Sep 17 00:00:00 2001
+From: Kalesh Singh <kaleshsingh@google.com>
+Date: Wed, 22 Jul 2026 07:25:18 +0000
+Subject: [PATCH] ANDROID: 16K: Fix potential lock inversion deadlock in
+ linker_ctx()
+
+When madvise(MADV_DONTNEED) executes under a per-VMA read lock, it
+holds the VMA's vm_refcnt. If linker_ctx() is called in this context
+and lock_vma_under_rcu() fails, it currently falls back to acquiring
+mmap_read_lock(). This inverts the lock order, as the correct order
+is mmap_lock -> per-VMA lock.
+
+If a concurrent thread executes a VMA write operation (such as
+mprotect), it acquires mmap_write_lock and waits for the target VMA's
+vm_refcnt to drain. If linker_ctx() is waiting for mmap_read_lock at
+the same time, both threads enter an unkillable deadlock.
+
+Thread A (madvise)                   Thread B (mprotect)
+------------------                   ------------------
+Acquire VMA read lock (vm_refcnt++)
+  |
+  |                                  Acquire mmap_write_lock
+  |                                  Acquire VMA write lock
+  |                                  (Wait for vm_refcnt -> 0)
+  |                                            |
+linker_ctx() starts                            |
+lock_vma_under_rcu() fails                     |
+Acquire mmap_read_lock (fallback)              |
+(Wait for mmap_lock)                           |
+  |                                            |
+  v                                            v
+[Blocked on B]                               [Blocked on A]
+
+To resolve this, the mmap_lock fallback is removed from linker_ctx().
+If lock_vma_under_rcu() fails, the function now conservatively
+returns false. This is safe as it only affects best-effort
+/proc/*/[s]maps emulated output.
+
+Additionally, early checks are added to reject kernel threads and
+non-user mode contexts immediately since they cannot be the dynamic
+linker.
+
+Bug: 508702921
+Change-Id: Ie2801be089df68a22f10cfdb8c3fa390c1da7177
+Signed-off-by: Kalesh Singh <kaleshsingh@google.com>
+(cherry picked from commit 099fe093d60d64b11b956622feb29bbfcf6b4c7e)
+---
+ mm/pgsize_migration.c | 41 +++++++++++++++++------------------------
+ 1 file changed, 17 insertions(+), 24 deletions(-)
+
+diff --git a/mm/pgsize_migration.c b/mm/pgsize_migration.c
+index 217f44ee1165..97e6c2d35021 100644
+--- a/mm/pgsize_migration.c
++++ b/mm/pgsize_migration.c
+@@ -223,36 +223,29 @@ static inline bool linker_ctx(void)
+ 	struct vm_area_struct *vma;
+ 	struct file *file;
+ 
+-	if (!regs)
++	/*
++	 * Called from madvise_dontneed_single_vma() with the target VMA
++	 * read-locked (MADVISE_VMA_READ_LOCK).  We MUST NOT take mmap_lock
++	 * here: that inverts the mmap_lock -> per-VMA-lock order and ABBA-
++	 * deadlocks against a concurrent vma_start_write() on the target
++	 * may occur.
++	 *
++	 * io_wq workers / kthreads have zeroed pt_regs (pc==0) and are never
++	 * the dynamic linker, so reject them up front instead of falling back
++	 * to mmap_read_lock().
++	 */
++	if (!regs || current->flags & (PF_IO_WORKER | PF_KTHREAD) ||
++	    !user_mode(regs))
+ 		return false;
+ 
+ 	vma = lock_vma_under_rcu(mm, instruction_pointer(regs));
+ 
+ 	/*
+-	 * lock_vma_under_rcu() is a try-lock that can fail if the
+-	 * VMA is already locked for modification.
+-	 *
+-	 * Fallback to finding the vma under mmap read lock.
++	 * Conservatively reject; only affects /proc/<pid>/[s]maps emulated
++	 * output.
+ 	 */
+-	if (!vma) {
+-		mmap_read_lock(mm);
+-
+-		vma = find_vma(mm, instruction_pointer(regs));
+-
+-		/* Current execution context, the VMA must be present */
+-		BUG_ON(!vma);
+-
+-		/*
+-		 * We cannot use vma_start_read() as it may fail due to
+-		 * false locked (see comment in vma_start_read()). We
+-		 * can avoid that by directly locking vm_lock under
+-		 * mmap_lock, which guarantees that nobody can lock the
+-		 * vma for write (vma_start_write()) under us.
+-		 */
+-		down_read(&vma->vm_lock->lock);
+-
+-		mmap_read_unlock(mm);
+-	}
++	if (!vma)
++		return false;
+ 
+ 	file = vma->vm_file;
+ 	if (!file)
+-- 
+2.55.0
+

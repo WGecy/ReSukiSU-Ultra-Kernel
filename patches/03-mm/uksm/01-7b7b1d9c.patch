@@ -1,0 +1,49 @@
+From 7b7b1d9c2f0384dd9148b9c3a4f34de4a8af2484 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=98=BF=E8=8F=8C=E2=80=A2=E6=9C=AA=E9=9C=9C?=
+ <799620521@qq.com>
+Date: Thu, 2 Mar 2023 11:54:03 +0800
+Subject: [PATCH] mm: uksm: Allow set default CPU governor
+
+---
+ mm/Kconfig | 14 ++++++++++++++
+ mm/uksm.c  |  2 +-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/mm/Kconfig b/mm/Kconfig
+index c4907559b6fcb..1e33667533e2a 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -858,6 +858,20 @@ config KSM_LEGACY
+ 	The legacy KSM implementation from Red Hat.
+ endchoice
+ 
++if UKSM
++
++config UKSM_CPU_GOVERNOR
++	int "Ultra-KSM default CPU governor"
++	range 0 3
++	help
++	The UKSM default CPU governor.
++	0: full
++	1: medium
++	2: low
++	3: quiet
++
++endif
++
+ config DEFAULT_MMAP_MIN_ADDR
+ 	int "Low address space to protect from user allocation"
+ 	depends on MMU
+diff --git a/mm/uksm.c b/mm/uksm.c
+index ffa252970ca82..08b719acd1963 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -525,7 +525,7 @@ static unsigned int uksm_sleep_saved;
+ /* Max percentage of cpu utilization ksmd can take to scan in one batch */
+ static unsigned int uksm_max_cpu_percentage;
+ 
+-static int uksm_cpu_governor;
++static int uksm_cpu_governor = CONFIG_UKSM_CPU_GOVERNOR;
+ 
+ static char *uksm_cpu_governor_str[4] = { "full", "medium", "low", "quiet" };
+ 

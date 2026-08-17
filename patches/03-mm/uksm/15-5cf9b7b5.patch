@@ -1,0 +1,25 @@
+From 5cf9b7b59040a96be164edb602ce34d3d5cac398 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Thu, 7 Aug 2025 09:05:15 +0800
+Subject: [PATCH] ANDROID: gki_defconfig: Add UKSM sleep interval configuration
+ to GKI defconfig
+
+This commit modifies the GKI defconfig for arm64 to include the
+CONFIG_UKSM_SLEEP_MS option, setting the UKSM sleep interval to 60,000
+milliseconds. This configuration enhances the UKSM (Ultra Kernel Samepage
+Merging) feature by defining the sleep duration for its scanning process.
+
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ arch/arm64/configs/gki_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index e9ee598165de..ff34454f4770 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -805,3 +805,4 @@ CONFIG_LTO_CLANG_THIN=y
+ CONFIG_LLVM_POLLY=y
+ CONFIG_LD_DEAD_CODE_DATA_ELIMINATION=y
+ CONFIG_UKSM_CPU_GOVERNOR=4
++CONFIG_UKSM_SLEEP_MS=60000

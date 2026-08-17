@@ -1,0 +1,23 @@
+From b49b67ca1ee43214a4812cdc6b36c78526c815ce Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=98=BF=E8=8F=8C=E2=80=A2=E6=9C=AA=E9=9C=9C?=
+ <799620521@qq.com>
+Date: Sun, 19 Mar 2023 18:15:55 +0800
+Subject: [PATCH] mm: uksm: Set default hash strength to 16
+
+---
+ mm/uksm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index 7dc77af3270ad..7e20204261487 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -714,7 +714,7 @@ static unsigned long stable_tree_index;
+ static u32 *random_nums;
+ 
+ /* The hash strength */
+-static unsigned long hash_strength = HASH_STRENGTH_FULL >> 4;
++static unsigned long hash_strength = HASH_STRENGTH_FULL >> 6;
+ 
+ /* The delta value each time the hash strength increases or decreases */
+ static unsigned long hash_strength_delta;

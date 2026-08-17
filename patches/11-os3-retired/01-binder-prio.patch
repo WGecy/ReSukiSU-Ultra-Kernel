@@ -1,0 +1,295 @@
+diff --git a/drivers/android/Makefile b/drivers/android/Makefile
+--- a/drivers/android/Makefile
++++ b/drivers/android/Makefile
+@@ -10,1 +10,2 @@ obj-$(CONFIG_ANDROID_DEBUG_KINFO)	+= debug_kinfo.o
+ obj-$(CONFIG_ANDROID_WRAPFD)		+= wrapfd.o
++obj-y += recon/
+
+diff --git a/drivers/android/recon/Makefile b/drivers/android/recon/Makefile
+--- a/drivers/android/recon/Makefile
++++ b/drivers/android/recon/Makefile
+@@ -0,0 +1 @@
++obj-y += binder_prio.o
+diff --git a/drivers/android/recon/binder_prio.c b/drivers/android/recon/binder_prio.c
+--- /dev/null
++++ b/drivers/android/recon/binder_prio.c
+@@ -0,0 +1,279 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * binder_prio - binder 关键进程事务 RT 提权 (6.12 语义 + 6.6 偏移还原)
++ *
++ * 逆向来源: 6.12.23-android16-5-gd8653a69a3aa-mi-4k binder_prio.ko
++ *   (cpq_work/vdlkm_root/lib/modules/binder_prio.ko)
++ * 反汇编: /tmp/opencode/binder_prio.dis (2 handler: set_priority@0x4 + trans@0x274)
++ *
++ * 6.12 语义 (与 6.6.57 版差异):
++ *   - 只注册 2 个 hook: android_vh_binder_set_priority + android_vh_binder_trans
++ *     (6.6.57 有 4 个, 含 transaction_init/proc_transaction 标记机制)
++ *   - 无 t->b0 标记检查
++ *   - 组合匹配条件: from_task->policy ∈ {3,4} → 跳过组合 (走通用)
++ *     6.6.57: 组合只匹配 FIFO/RR? 不 —— 两者相同, 均 policy∉{3,4} 才组合
++ *   - 组合5 前置: from->pid==from->tgid (6.12 task_struct pid@0x708, tgid@0x70c)
++ *   - 组合5 名单: 7 个 (6.6.57 有 26 个)
++ *   - trans handler: target_proc->default_priority = {sched_policy:1, prio:98}
++ *     (6.12 写 target_proc+0x1d8; 6.6.57 写 target_proc+0x198, 均 default_priority)
++ *     前置: target_proc->tsk->comm=="surfaceflinger" && thread->transaction_stack
++ *     非空 && transaction_stack->flags bit0==0
++ *
++ * 6.6 偏移 (全部 6.6.142 Kbuild 编译验证):
++ *   binder_thread.task@0x1b8, binder_proc.tsk@0x48
++ *   binder_proc.default_priority@0x198, binder_proc.outstanding_txns@0x6c
++ *   t.from@0x28, t.to_proc@0x40, t.buffer@0x60, t.flags@0x6c
++ *   buffer.target_node@0x38, node.min_priority@0x72, node.sched_policy@0x71
++ *   task.comm@0x830, task.policy@0x488, task.group_leader@0x658
++ *   task.pid@0x618, task.tgid@0x61c
++ *
++ * 提权语义 (反汇编 0x244/0x25c 命中, 0x78/0x250 通用):
++ *   命中: min_priority=98, policy=1(SCHED_FIFO) → prio=99-98=1
++ *   通用: sched_policy&3 ∈{1,2}, prio=99-min_priority
++ *   前置: task->policy == 目标 policy → 跳过
++ *   写入: sched_setscheduler_nocheck(task, policy|0x40000000, {prio})
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/string.h>
++#include <linux/sched.h>
++#include <linux/sched/rt.h>
++#include <uapi/linux/sched/types.h>
++#include <trace/hooks/binder.h>
++#include "../binder_internal.h"
++
++#define BPRIO_RESET_ON_FORK	0x40000000
++#define BPRIO_MAX_PRIO		99
++#define BPRIO_HIT_PRIO		98
++
++/*
++ * 组合5 名单 (6.12 rodata 解码, 7 项) + 原版 strncmp 长度 (w2 立即数)
++ * 注意: 长度含 NUL 语义 (如 "ndroid.systemui" 用 15, 要求 comm[14]=='\0',
++ * 与 strlen 版行为不同, 必须用原版长度)
++ */
++static const struct {
++	const char *name;
++	size_t len;
++} bprio_task_names[] = {
++	{ "com.miui.home",	13 },
++	{ "ndroid.systemui",	15 },
++	{ "surfaceflinger",	14 },
++	{ "cameraserver",	12 },
++	{ "rsonalassistant",	15 },
++	{ "camera.provider",	15 },
++	{ "com.tencent.mm",	14 },
++};
++
++static bool bprio_comm_match(const char *comm, const char *target, size_t len)
++{
++	if (!comm || !target)
++		return false;
++	return !strncmp(comm, target, len);
++}
++
++/*
++ * set_priority handler (反汇编 0x4-0x26c)
++ * probe: (void *data, struct binder_transaction *t, struct task_struct *task)
++ *   x1=t, x2=task, x22=from_task, x24=to_task, x23=gl
++ */
++static void bprio_set_priority_handler(void *data,
++				       struct binder_transaction *t,
++				       struct task_struct *task)
++{
++	struct binder_node *node;
++	struct binder_thread *from;
++	struct task_struct *from_task = NULL;
++	struct task_struct *to_task = NULL;
++	struct task_struct *gl;
++	/* t==NULL 时原版在 0x2c 已解引用崩溃 (hook 保证 t 非空),
++	 * 初始化避免 C UB (正常路径会被覆盖) */
++	unsigned int min_priority = 0;
++	unsigned int sched_policy = 0;
++	unsigned int new_policy;
++	bool hit = false;
++	int i;
++	struct sched_param param;
++
++	if (!t)
++		goto common;
++
++	/* 反汇编 0x2c-0x38: node = t->buffer->target_node */
++	node = t->buffer->target_node;
++	min_priority = node->min_priority;
++	/*
++	 * node->sched_policy 由 binder.c 中
++	 *   node->sched_policy = (flags & FLAT_BINDER_FLAG_SCHED_POLICY_MASK) >>
++	 *                        FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT;
++	 * 赋值; FLAT_BINDER_FLAG_SCHED_POLICY_MASK = 3U << 9 ⇒ 仅 2 bit,
++	 * 取值 0..3 (SCHED_NORMAL / SCHED_FIFO / SCHED_RR / SCHED_BATCH),
++	 * 永不含 SCHED_IDLE(5) 与 SCHED_DEADLINE(6).
++	 * 依据: include/uapi/linux/android/binder.h 的 flat_binder_object_flags.
++	 * 下游 `sched_policy & 3` 据此不可能把 IDLE/DEADLINE 误降为 FIFO/RR.
++	 */
++	sched_policy = node->sched_policy;
++
++	/* 反汇编 0x40-0x5c: from/task/to_proc/to_task 前置 */
++	from = t->from;
++	if (!from)
++		goto common;
++	from_task = from->task;
++	if (!from_task)
++		goto common;
++	if (!t->to_proc)
++		goto common;
++	to_task = t->to_proc->tsk;
++	if (!to_task)
++		goto common;
++
++	/* 反汇编 0x60-0x64: t->flags bit0 → 通用 */
++	if (t->flags & 1)
++		goto common;
++
++	/*
++	 * 反汇编 0x68-0x74: sub w8,w8,#3; cmn w8,#2; b.hs 0xe0
++	 * = (policy-3) >= 2 (无符号) → 0xe0 组合匹配
++	 * policy∈{3,4} (BATCH/ISO) 时 policy-3<2 → 0x78 通用路径
++	 */
++	if (READ_ONCE(from_task->policy) - 3 < 2)
++		goto common;
++
++	gl = READ_ONCE(from_task->group_leader);
++
++	/* 组合1 (0xe8-0x12c): gl==com.miui.home && from==RenderThread && to==surfaceflinger */
++	if (bprio_comm_match(gl ? gl->comm : NULL, "com.miui.home", 13) &&
++	    bprio_comm_match(from_task->comm, "RenderThread", 12) &&
++	    bprio_comm_match(to_task->comm, "surfaceflinger", 14))
++		hit = true;
++
++	/* 组合2 (0x130-0x15c): gl==surfaceflinger && from==passBlur */
++	if (!hit &&
++	    bprio_comm_match(gl ? gl->comm : NULL, "surfaceflinger", 14) &&
++	    bprio_comm_match(from_task->comm, "passBlur", 8))
++		hit = true;
++
++	/* 组合3 (0x160-0x174): gl==cameraserver */
++	if (!hit &&
++	    bprio_comm_match(gl ? gl->comm : NULL, "cameraserver", 12))
++		hit = true;
++
++	/* 组合4 (0x178-0x18c): gl==camera.provider */
++	if (!hit &&
++	    bprio_comm_match(gl ? gl->comm : NULL, "camera.provider", 15))
++		hit = true;
++
++	/* 组合5 (0x190-0x248): from->pid==from->tgid && from 匹配 7 名单 */
++	if (!hit && from_task->pid == from_task->tgid) {
++		for (i = 0; i < ARRAY_SIZE(bprio_task_names); i++) {
++			if (bprio_comm_match(from_task->comm,
++					     bprio_task_names[i].name,
++					     bprio_task_names[i].len)) {
++				hit = true;
++				break;
++			}
++		}
++	}
++
++common:
++	if (hit) {
++		/* 反汇编 0x250/0x25c: w19=98, w8=1 */
++		min_priority = BPRIO_HIT_PRIO;
++		new_policy = SCHED_FIFO;
++	} else {
++/*
++	 * 反汇编 0x78-0x84: w8=sched_policy&3, ∉{1,2} → ret
++	 * 字段范围 0..3 (见上方 node->sched_policy 取值依据), `& 3` 是冗余但
++	 * 无害的位与, 不会因 SCHED_IDLE(5)→ SCHED_FIFO(1) 而误升 (5 不出现).
++	 * SCHED_BATCH(3) & 3 == 3, 不等于 FIFO/RR, 后续 return. 语义正确.
++	 */
++	new_policy = sched_policy & 3;
++	if (new_policy != SCHED_FIFO && new_policy != SCHED_RR)
++		return;
++	}
++
++	/* 反汇编 0x88-0x90: task->policy == 目标 → 跳过 */
++	if (READ_ONCE(task->policy) == new_policy)
++		return;
++
++	/* 反汇编 0x94-0xac:
++	 * prio=99-min_priority, policy=w8|0x40000000
++	 * sched_setscheduler_nocheck(task, policy, {prio}) */
++	param.sched_priority = BPRIO_MAX_PRIO - min_priority;
++	sched_setscheduler_nocheck(task, new_policy | BPRIO_RESET_ON_FORK,
++				   &param);
++}
++
++/*
++ * trans handler (反汇编 0x274-0x2f8)
++ * hook: android_vh_binder_trans (6.6 GKI 4 参数版)
++ *   x1=target_proc, x2=proc, x3=thread, x4=tr
++ *
++ * 语义 (逐条):
++ *   0x28c-0x2b4: target_proc->tsk 非空 && strncmp(tsk->comm,"surfaceflinger",14)==0
++ *   0x2d0-0x2d8: proc/thread/tr 非空
++ *   0x2dc-0x2e8: thread->transaction_stack 非空
++ *                && (transaction_stack->flags & 1) == 0
++ *                (binder_thread.transaction_stack@0x40, t.flags@0x6c,
++ *                 6.6/6.12 编译验证一致)
++ *   0x2ec-0x2f4: target_proc->default_priority = 0x6200000001
++ *                = {sched_policy:1(SCHED_FIFO), prio:98}
++ *                (6.12 写 proc+0x1d8, 6.6.57 写 proc+0x198, 均 default_priority)
++ */
++static void bprio_trans_handler(void *data, struct binder_proc *target_proc,
++				struct binder_proc *proc,
++				struct binder_thread *thread,
++				struct binder_transaction_data *tr)
++{
++	/* 反汇编 0x28c-0x2b4: target_proc->tsk && comm=="surfaceflinger" */
++	if (!target_proc || !target_proc->tsk)
++		return;
++	if (strncmp(target_proc->tsk->comm, "surfaceflinger", 14))
++		return;
++
++	/* 反汇编 0x2d0-0x2d8: proc/thread/tr 非 NULL */
++	if (!proc || !thread || !tr)
++		return;
++
++	/* 反汇编 0x2dc-0x2e8: transaction_stack 非空 && flags bit0==0 */
++	if (!thread->transaction_stack)
++		return;
++	if (thread->transaction_stack->flags & 1)
++		return;
++
++	/* 反汇编 0x2ec-0x2f4 */
++	target_proc->default_priority.sched_policy = SCHED_FIFO;
++	target_proc->default_priority.prio = BPRIO_HIT_PRIO;
++}
++
++static int __init bprio_init(void)
++{
++	int ret;
++
++	ret = register_trace_android_vh_binder_set_priority(
++			bprio_set_priority_handler, NULL);
++	if (ret) {
++		pr_err("binder_prio: register binder_set_priority hook failed ret=%d\n", ret);
++		return ret;
++	}
++	/* 反汇编 0x34-0x4c: 第二个注册 (binder_trans) 返回值被忽略,
++	 * 原版不检查, 直接返回 0 */
++	register_trace_android_vh_binder_trans(
++			bprio_trans_handler, NULL);
++	pr_info("binder_prio: module init!\n");
++	return 0;
++}
++
++static void __exit bprio_exit(void)
++{
++	unregister_trace_android_vh_binder_set_priority(
++			bprio_set_priority_handler, NULL);
++	unregister_trace_android_vh_binder_trans(
++			bprio_trans_handler, NULL);
++	pr_info("binder_prio: module exit!\n");
++}
++
++module_init(bprio_init);
++module_exit(bprio_exit);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("binder priority boost for key system processes (6.12 semantics, 6.6 offsets, based on MIUI binder_prio.ko 6.12.23)");

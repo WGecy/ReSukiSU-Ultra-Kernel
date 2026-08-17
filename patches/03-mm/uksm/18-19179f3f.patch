@@ -1,0 +1,29 @@
+From 19179f3f99b38578c94ff8688a00bdee230aa7cb Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Sun, 17 Aug 2025 19:11:10 +0800
+Subject: [PATCH] mm: uksm: Lower uksm_abundant_threshold to 5
+
+Reduce the uksm_abundant_threshold from 10 to 5 to make the deduplication
+process more sensitive to memory pages with lower deduplication ratios.
+This change aims to improve memory efficiency by allowing UKSM to consider
+pages with a lower deduplication ratio as abundant, potentially increasing
+the frequency of deduplication in certain workloads.
+
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ mm/uksm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index c84718f29b3cc..49c06dc0e7ae7 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -659,7 +659,7 @@ static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
+ static unsigned int uksm_thrash_threshold = 50;
+ 
+ /* How much dedup ratio is considered to be abundant*/
+-static unsigned int uksm_abundant_threshold = 10;
++static unsigned int uksm_abundant_threshold = 5;
+ 
+ /* All slots having merged pages in this eval round. */
+ struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);

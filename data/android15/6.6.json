@@ -1,0 +1,14 @@
+{
+  "android_version": "android15",
+  "kernel_version": "6.6",
+  "entries": [
+    {
+      "date": "2025-03",
+      "kernel": "6.6.77"
+    },
+    {
+      "date": "2026-01",
+      "kernel": "6.6.118"
+    }
+  ]
+}

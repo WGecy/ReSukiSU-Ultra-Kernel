@@ -1,0 +1,31 @@
+From c9ed62c63dab6b7fc1ca8c1a033b6724250a4a85 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Tue, 29 Jul 2025 18:19:02 +0800
+Subject: [PATCH] ANDROID: gki_defconfig: Enable UKSM CPU governor with android
+ setting
+
+Add CONFIG_UKSM_CPU_GOVERNOR=1 to gki_defconfig to enable the Ultra-KSM
+default CPU governor with the 'android' setting (value 4). This configuration
+optimizes UKSM behavior for Android systems, as described in the UKSM CPU
+governor options:
+  0: full
+  1: medium
+  2: low
+  3: quiet
+  4: android
+
+Change-Id: I50541e9b963ed08345dff68cd9b4b683e0c1aaef
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ arch/arm64/configs/gki_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index ad0924761c59..91d07c0b10ec 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -800,3 +800,4 @@ CONFIG_LTO_CLANG=y
+ CONFIG_LTO_CLANG_THIN=y
+ CONFIG_LLVM_POLLY=y
+ CONFIG_LD_DEAD_CODE_DATA_ELIMINATION=y
++CONFIG_UKSM_CPU_GOVERNOR=1

@@ -1,0 +1,101 @@
+diff --git a/drivers/android/recon/Makefile b/drivers/android/recon/Makefile
+--- a/drivers/android/recon/Makefile
++++ b/drivers/android/recon/Makefile
+@@ -1,2 +1,3 @@
+ obj-y += binder_prio.o
+ obj-y += kshrink_slabd.o
++obj-y += tesla_guard.o
+
+diff --git a/drivers/android/recon/tesla_guard.c b/drivers/android/recon/tesla_guard.c
+new file mode 100644
+index 000000000000..000000000000
+--- /dev/null
++++ b/drivers/android/recon/tesla_guard.c
+@@ -0,0 +1,87 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * tesla_guard - LSM 阻断原厂 binder_prio.ko 重复加载
++ *
++ * 参照 djt889/android_gki_kernel LSM 拦截示例 (r3_audit_lsm):
++ *   - 仅拦 binder_prio.ko (精确文件名)
++ *   - 仅系统分区路径 (vendor_dlkm/vendor/system/odm/product/system_ext)
++ *   - 其他路径 (recovery/ramdisk) 放行, 避免 recovery 卡第一屏
++ *   - DEFINE_EARLY_LSM: 早于任何模块加载注册
++ *
++ * 说明: 不拦 kshrink_slabd.ko —— 它从 ramdisk (/lib/modules/) 加载,
++ *       不属于系统分区路径; 且正常 boot 早期模块加载路径不能误伤。
++ */
++#include <linux/dcache.h>
++#include <linux/fs.h>
++#include <linux/kernel_read_file.h>
++#include <linux/lsm_hooks.h>
++#include <linux/path.h>
++#include <linux/printk.h>
++#include <linux/string.h>
++
++#define TESLA_GUARD_BLOCK_FILENAME	"binder_prio.ko"
++#define TESLA_GUARD_BLOCK_FILENAME_LEN	(sizeof(TESLA_GUARD_BLOCK_FILENAME) - 1)
++
++/* 系统分区挂载点: 从这些路径加载的 binder_prio.ko 是拦截目标 */
++static bool tesla_guard_system_path(const char *path)
++{
++	return !strncmp(path, "/vendor_dlkm/", 13) ||
++	       !strncmp(path, "/vendor/", 8) ||
++	       !strncmp(path, "/system/", 8) ||
++	       !strncmp(path, "/odm/", 5) ||
++	       !strncmp(path, "/product/", 9) ||
++	       !strncmp(path, "/system_ext/", 12);
++}
++
++static int tesla_guard_kernel_read_file(struct file *file,
++					enum kernel_read_file_id id,
++					bool unused)
++{
++	const struct dentry *dentry;
++	char *buf, *path;
++
++	if (id != READING_MODULE)
++		return 0;
++
++	if (!file)
++		return 0;
++
++	dentry = file->f_path.dentry;
++	if (!dentry || !dentry->d_name.name ||
++	    dentry->d_name.len != TESLA_GUARD_BLOCK_FILENAME_LEN ||
++	    memcmp(dentry->d_name.name, TESLA_GUARD_BLOCK_FILENAME,
++		   TESLA_GUARD_BLOCK_FILENAME_LEN))
++		return 0;
++
++	buf = __getname();
++	if (!buf)
++		return 0;
++
++	path = d_path(&file->f_path, buf, PATH_MAX);
++	if (!IS_ERR(path) && tesla_guard_system_path(path)) {
++		__putname(buf);
++		pr_info_ratelimited("tesla_guard: BLOCKED binder_prio module load (system path)\n");
++		return -EPERM;
++	}
++	__putname(buf);
++	pr_info_ratelimited("tesla_guard: binder_prio load from non-system path, allow\n");
++
++	return 0;
++}
++
++static struct security_hook_list tesla_guard_hooks[] __ro_after_init = {
++	LSM_HOOK_INIT(kernel_read_file, tesla_guard_kernel_read_file),
++};
++
++static int __init tesla_guard_init(void)
++{
++	security_add_hooks(tesla_guard_hooks, ARRAY_SIZE(tesla_guard_hooks),
++			   "tesla_guard");
++	pr_info("tesla_guard: LSM initialized (block vendor_dlkm binder_prio)\n");
++	return 0;
++}
++
++DEFINE_EARLY_LSM(tesla_guard) = {
++	.name = "tesla_guard",
++	.init = tesla_guard_init,
++};

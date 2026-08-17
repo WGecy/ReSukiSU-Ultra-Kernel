@@ -1,0 +1,179 @@
+patches:
+- id: sched/binder-prio
+  file: 11-os3-retired/01-binder-prio.patch
+  note: OS4 退役 (2026-08-14): 官方 xr_qi.ko 承接 binder QoS, 与官方冲突, 归档
+  stage: 2
+  desc: binder 事务 RT 提权 (逆向原厂 binder_prio.ko)
+  status: on-device
+  note: 需 recon 框架 (drivers/android/recon)
+- id: sched/kshrink-slabd
+  file: 11-os3-retired/02-kshrink-slabd.patch
+  note: OS4 退役 (2026-08-14): 官方 kshrink_slabd.ko KMI 兼容可直接加载, 归档
+  stage: 2
+  desc: 异步 slab 回收守护
+  status: on-device
+  note: 需 recon 框架
+- id: sched/tesla-guard
+  file: 11-os3-retired/03-tesla-guard.patch
+  note: OS4 退役 (2026-08-14): 拦的官方 ko 已移除/直装, 无需 LSM, 归档
+  stage: 2
+  desc: LSM 阻断 /vendor_dlkm 原厂 binder_prio/kshrink ko 重复加载 (recovery 放行)
+  status: on-device
+  note: 依赖 01/02 先应用 (recon/Makefile); DEFINE_LSM 注册, 需 CONFIG_LSM 含 tesla_guard
+- id: sched/tesla-vendorhook
+  file: 11-os3-retired/04-tesla-vendorhook.patch
+  note: OS4 退役 (2026-08-14): 框架空壳 (无模块使用), 归档
+  stage: 2
+  desc: 'Tesla hook 框架 (tesla_hook 核心 + eevdf_fix 诊断观测)'
+  status: on-device
+  note: 'restricted hooks 不可注销; eevdf_fix 已收紧为纯诊断 (preempt_events 等只读计数)'
+- id: sched/dynamic-readahead
+  file: 11-os3-retired/06-dynamic-readahead.patch
+  stage: 2
+  desc: 动态预读调优 (逆向小米 dynamic_readahead.ko)
+  status: retired
+  note: 'OS4 退役 (2026-08-14): 官方 dynamic_readahead.ko KMI 兼容可直接加载, 归档'
+- id: sched/mi-wq
+  file: 11-os3-retired/07-mi-wq-dynamic-priority.patch
+  stage: 2
+  desc: workqueue 动态优先级 (逆向 mi_wq_dynamic_priority.ko)
+  status: retired
+  note: 'OS4 退役 (2026-08-14): 官方 mi_wq_dynamic_priority.ko 依赖 xr_qi 可直装, 归档'
+- id: sched/protect-slice
+  file: 02-sched/05-protect-slice.patch
+  stage: 2
+  desc: '6.18 protect-slice 移植 (union vprot) - 卡logo, 已回滚停用'
+  status: bad
+  note: '源码字段补丁致卡logo不开机 (2026-08-12); 已从构建流程移除, 保留补丁供参考'
+- id: sched/lts-sched-core
+  file: 02-sched/lts-sched-core.patch
+  stage: 1
+  desc: LTS sched/core+rt 修复 (8d4edc89bf71)
+  status: pending
+- id: mm/mthp
+  file: 03-mm/08-mthp.patch
+  stage: 3
+  desc: mTHP 多尺寸大页
+  status: pending
+- id: mm/lru-gen-export
+  file: 03-mm/16-lru-gen-export.patch
+  stage: 3
+  desc: 导出 lru_gen_caps/change_state (MGLRU 自启用)
+  status: on-device
+- id: tune/performance
+  file: 06-tune/performance-tune.patch
+  stage: 6
+  desc: 性能参数调优 (mq-deadline 超时/f2fs ioprio/compact/oom)
+  status: pending
+- id: mm/lts-page-alloc
+  file: 03-mm/lts-page-alloc.patch
+  stage: 1
+  desc: LTS page_alloc 修复 (3edb8ebbf79b)
+  status: pending
+- id: mm/lts-pgsize
+  file: 03-mm/lts-pgsize.patch
+  stage: 1
+  desc: LTS pgsize_migration 修复 (b7b4b81b56cc)
+  status: pending
+- id: mm/uksm
+  file: 03-mm/uksm/ (17 分片)
+  stage: 3
+  desc: UKSM 内存去重 (17 补丁合并为单文件, brokestar233 6.6 移植)
+  status: bad
+  note: '已禁用 (2026-08-10): UKSM 与 ART GC 冲突 → system_server HeapTaskDaemon SIGSEGV (SEGV_ACCERR) → 死机重启。证据: KernelSU_bugreport_2026-08-10_19_45 tombstone_07 (ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor), 同机 com.xiaomi.aicr 也连续 GC SIGSEGV。ART 堆被跨进程去重后 GC 标记阶段踩坏引用。需 CONFIG_UKSM_CPU_GOVERNOR=1; 若要恢复必须排除 ART 堆 (GKI 上难以精确排除, 建议保持关闭)'
+- id: io/cpq-tune
+  file: 11-os3-retired/05-cpq-tune.patch
+  note: OS4 退役 (2026-08-14): ADIOS 已为默认调度器, cpq 调优冗余, 归档
+  stage: 4
+  desc: CPQ IO 调度器参数 (内核态调 store 函数)
+  status: on-device
+- id: io/adios
+  file: 04-block-io/14-adios.patch
+  stage: 4
+  desc: ADIOS IO 调度器 (OKI 6.6.118 移植)
+  status: on-device
+- id: io/ufs-fastdiscard
+  file: 04-block-io/07-ufs-fastdiscard.patch
+  stage: 4
+  desc: UFS FastDiscard (fstrim 加速)
+  status: on-device
+- id: io/ufs-race-fix
+  file: 04-block-io/11-ufs-race-fix.patch
+  stage: 1
+  desc: UFS race 修复
+  status: pending
+- id: io/lts-blk-cgroup
+  file: 04-block-io/lts-blk-cgroup.patch
+  stage: 1
+  desc: LTS blk-cgroup 修复 (4048ed98860d)
+  status: pending
+- id: io/lts-disk-events
+  file: 04-block-io/lts-disk-events.patch
+  stage: 1
+  desc: LTS disk-events 修复 (5dd9d864eb96)
+  status: pending
+- id: io/lts-zram
+  file: 04-block-io/lts-zram.patch
+  stage: 1
+  desc: LTS zram 修复 (2d1f18efccdb)
+  status: pending
+- id: io/zstd
+  file: 04-block-io/zstd-1.5.7.patch
+  stage: 4
+  desc: zstd 1.5.7 压缩级别可调
+  status: pending
+- id: net/bbrv3
+  file: 05-net/06-bbrv3.patch
+  stage: 4
+  desc: BBRv3 拥塞控制 (T-Kernel 移植)
+  status: on-device
+- id: drv/cpuidle
+  file: 07-drivers/09-cpuidle.patch
+  stage: 5
+  desc: cpuidle/cpufreq 优化
+  status: pending
+- id: thermal/offset
+  file: 08-thermal/thermal-offset.patch
+  stage: 5
+  desc: 温控偏移 sysctl (游戏防降频, 默认 3°C)
+  status: on-device
+- id: android/unicode-bypass
+  file: 09-android/unicode_bypass_fix_6.1+.patch
+  stage: 9
+  desc: Unicode 零宽字符绕过 (SUSFS 相关)
+  status: pending
+  note: 6.1+ 内核用此文件; 需 SUSFS
+- id: tune/vm-defaults
+  file: 06-tune/vm-defaults.patch
+  stage: 6
+  desc: vm 内存参数调优 (watermark=30/swappiness=100/page-cluster=0)
+  status: pending
+  note: T-677 时代内核态参数定制
+- id: exp/lts-suspend-fixes
+  file: 10-experimental/lts-suspend-fixes.patch
+  stage: 9
+  desc: LTS suspend 修复 (zram 睡眠 shrinker + page_reporting UAF)
+  status: bad
+  note: '两个一起: 同源于 6.6.142→151 LTS'
+- id: exp/mglru-aging
+  file: 10-experimental/20-mglru-aging.patch
+  stage: 9
+  desc: MGLRU aging 7.2 移植
+  status: bad
+- id: exp/mglru-batch
+  file: 10-experimental/21-mglru-batch.patch
+  stage: 9
+  desc: MGLRU batch stale 7.2 移植
+  status: bad
+- id: zram/lz4kd
+  file: ''
+  stage: 4
+  desc: zram LZ4 补丁栈 (LZ4 1.10/lz4k/lz4kd, 参照 zzh)
+  status: on-device
+  special: zram
+- id: fs/fusebpf
+  file: ''
+  stage: 1
+  desc: FUSEBPF 修复 (lookup_revalidate + no-Eexist)
+  status: on-device
+  special: fusebpf

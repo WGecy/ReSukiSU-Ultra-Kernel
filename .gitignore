@@ -1,0 +1,7 @@
+build/
+out/
+.venv/
+third_party/toolchain/
+third_party/ksu/ReSukiSU-src/
+__pycache__/
+*.log

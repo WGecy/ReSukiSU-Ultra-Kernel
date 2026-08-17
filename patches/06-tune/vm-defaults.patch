@@ -1,0 +1,21 @@
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -330,1 +330,1 @@
+-static int watermark_scale_factor = 10;
++static int watermark_scale_factor = 70;
+diff --git a/mm/swap.c b/mm/swap.c
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -1133,1 +1133,1 @@
+-		page_cluster = 2;
++		page_cluster = 0;
+@@ -1135,1 +1135,1 @@
+-		page_cluster = 3;
++		page_cluster = 0;
+diff --git a/fs/dcache.c b/fs/dcache.c
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -74,1 +74,1 @@
+-int sysctl_vfs_cache_pressure __read_mostly = 100;
++int sysctl_vfs_cache_pressure __read_mostly = 50;

@@ -1,0 +1,25 @@
+From fedfcbeefe62c20846f8651cb556459b268e9c2b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=98=BF=E8=8F=8C=E2=80=A2=E6=9C=AA=E9=9C=9C?=
+ <799620521@qq.com>
+Date: Thu, 2 Mar 2023 12:30:53 +0800
+Subject: [PATCH] mm: uksm: Allow set max CPU percentage to 1
+
+---
+ mm/uksm.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index 08b719acd1963..a2cb54470d878 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -4952,8 +4952,8 @@ static ssize_t max_cpu_percentage_store(struct kobject *kobj,
+ 
+ 	if (max_cpu_percentage == 100)
+ 		max_cpu_percentage = 99;
+-	else if (max_cpu_percentage < 10)
+-		max_cpu_percentage = 10;
++	else if (max_cpu_percentage < 1)
++		max_cpu_percentage = 1;
+ 
+ 	uksm_max_cpu_percentage = max_cpu_percentage;
+ 

@@ -1,0 +1,184 @@
+diff --git a/drivers/android/recon/Makefile b/drivers/android/recon/Makefile
+index 0234d79..ef3c6f5 100644
+--- a/drivers/android/recon/Makefile
++++ b/drivers/android/recon/Makefile
+@@ -2,3 +2,4 @@ obj-y += binder_prio.o
+ obj-y += kshrink_slabd.o
+ obj-y += tesla_guard.o
+ obj-y += tesla_hook.o
++obj-y += dynamic_readahead.o
+diff --git a/drivers/android/recon/dynamic_readahead.c b/drivers/android/recon/dynamic_readahead.c
+new file mode 100644
+index 0000000..5a5f5a0
+--- /dev/null
++++ b/drivers/android/recon/dynamic_readahead.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * dynamic_readahead - 小米 dynamic_readahead.ko 6.6 移植 (反汇编还原)
++ *
++ * 逆向来源: 6.12.69-android16-6-maybe-dirty-4k dynamic_readahead.ko
++ * 反汇编: /tmp/opencode/dra.dis (adjust_readahead@0x4, adjust_readaround@0xb4,
++ *         ra_close_lf_page_cache_ra_order_bypass@0x180, should_fault_around@0x1cc)
++ *
++ * 6.12 语义还原:
++ *   - 4 个 tracepoint 全注册 (失败仅打日志, 不中断 init):
++ *     ra_tuning_max_page / tune_mmap_readaround / should_fault_around
++ *     (page_cache_ra_order_bypass 为 6.12 新增 hook, 6.6 无此声明, 跳过)
++ *   - 门控 (adjust_* 共用): enable==1 && 当前任务在 background cgroup
++ *     && prio>=100 (非 RT) && 全局空闲页 < high_wm
++ *   - adjust_readahead: 门控通过则 *max_page = min(*max_page, ra->ra_pages/2)
++ *     (6.12: ractl->ra@0x10, ra->ra_pages@0x10; 与 6.6 readahead_control/file_ra_state 一致)
++ *   - adjust_readaround: 门控通过则
++ *     *start = max(0, pgoff - ra_pages/4); *size = ra_pages/2; *async_size = ra_pages/8
++ *     (6.6 默认是 start=pgoff-ra_pages/2, size=ra_pages, async=ra_pages/4, 均收紧一半)
++  *   - should_fault_around: *should_around = (cred->uid >> 4) > 0x270
++  *     = current_uid() >= 10000 (AID_APP): 应用进程保留 fault-around, 系统进程关闭
++  *     (OS4 6.6.57 反汇编确认: [task+0x820]=cred, [cred+0x8]=uid)
++ *   - cgroup 门控链路 (6.12): current->cgroups(0xb38) -> css_set->subsys[0]
++ *     -> css->cgroup(0x0) -> +0x108(kn) -> +0x10(name) -> strncmp("background", 11)
++ *     6.6 等价: task_css(current, cpuset_cgrp_id)->cgroup->kn->name
++ *   - high_wm 初始化: 遍历 node_zones 累加 watermark 字段 (6.12 读 zone+0x10/+0x20),
++ *     6.6 等价: Σ high_wmark_pages(zone); 打印 "dynamic_readahead_init high_wm: %llu"
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/string.h>
++#include <linux/mm.h>
++#include <linux/mmzone.h>
++#include <linux/vmstat.h>
++#include <linux/pagemap.h>
++#include <linux/cgroup.h>
++#include <linux/rcupdate.h>
++#include <trace/hooks/mm.h>
++
++static bool enable = true;
++module_param(enable, bool, 0644);
++MODULE_PARM_DESC(enable, "dynamic_readahead master switch (0=off)");
++
++static unsigned long high_wm;
++
++static bool in_background_cgroup(void)
++{
++	struct cgroup_subsys_state *css;
++	bool ret = false;
++
++	rcu_read_lock();
++	css = task_css(current, cpuset_cgrp_id);
++	if (css && css->cgroup && css->cgroup->kn)
++		ret = !strncmp(css->cgroup->kn->name, "background", 11);
++	rcu_read_unlock();
++	return ret;
++}
++
++/* 门控: 开关 + background cgroup + 非 RT + 空闲页低于高水位 */
++static bool ra_gate_ok(void)
++{
++	if (!enable)
++		return false;
++	if (!in_background_cgroup())
++		return false;
++	if (current->prio < MAX_RT_PRIO)
++		return false;
++	if ((unsigned long)global_zone_page_state(NR_FREE_PAGES) >= high_wm)
++		return false;
++	return true;
++}
++
++static void adjust_readahead(void *data, struct readahead_control *ractl,
++			     unsigned long *max_page)
++{
++	unsigned long ra_pages = ractl->ra->ra_pages;
++
++	if (!ra_gate_ok())
++		return;
++
++	*max_page = min(*max_page, ra_pages / 2);
++}
++
++static void adjust_readaround(void *data, unsigned int ra_pages, pgoff_t pgoff,
++			      pgoff_t *start, unsigned int *size,
++			      unsigned int *async_size)
++{
++	if (!ra_gate_ok())
++		return;
++
++	*start = max_t(long, 0, (long)pgoff - (long)(ra_pages / 4));
++	*size = ra_pages / 2;
++	*async_size = ra_pages / 8;
++}
++
++static void should_fault_around(void *data, struct vm_fault *vmf,
++				bool *should_around)
++{
++	/*
++	 * OS4 (6.6.57) 反汇编: mrs SP_EL0; ldr [task+0x820]=cred;
++	 * ldr w8,[cred+0x8]=uid; lsr #4; cmp #0x270; cset hi
++	 * → *should_around = (uid >> 4) > 0x270 ⟺ uid >= 0x2710 = 10000 = AID_APP
++	 * 即: 应用进程(uid>=10000)保留内核默认 fault-around, 系统进程强制关闭.
++	 * 6.6.77/6.6.118 同布局 (cred 首成员 usage@0, uid@0x8), 用标准 API 等价.
++	 */
++	*should_around = current_uid() >= 10000;
++}
++
++static void calc_high_wm(void)
++{
++	struct zone *zone;
++
++	/* OS4 (6.6.57) init: 遍历 node_zones, high_wm += _watermark[WMARK_HIGH]
++	 *                          + watermark_boost  (反汇编 [z+0x10]+[z+0x20])
++	 * = 6.6 high_wmark_pages(z) 定义 (_watermark[WMARK_HIGH] + watermark_boost) */
++	high_wm = 0;
++	for_each_zone(zone)
++		high_wm += high_wmark_pages(zone);
++	pr_info("dynamic_readahead: dynamic_readahead_init high_wm: %llu\n",
++		(unsigned long long)high_wm);
++}
++
++static int __init dynamic_readahead_init(void)
++{
++	int ret;
++
++	/*
++	 * 6.12 原版语义: #1/#2 注册失败为致命 (返回 err, 并回滚已注册项),
++	 * #3 (should_fault_around) 失败仅打日志继续.
++	 * (6.12 注册顺序: ra_tuning_max_page → tune_mmap_readaround →
++	 *  page_cache_ra_order_bypass[6.6 无] → should_fault_around)
++	 */
++	ret = register_trace_android_vh_ra_tuning_max_page(adjust_readahead, NULL);
++	if (ret) {
++		pr_err("dynamic_readahead: register_trace_android_vh_ra_tuning_max_page failed! ret=%d\n",
++		       ret);
++		return ret;
++	}
++
++	ret = register_trace_android_vh_tune_mmap_readaround(adjust_readaround, NULL);
++	if (ret) {
++		pr_err("dynamic_readahead: register_trace_android_vh_tune_mmap_readaround failed! ret=%d\n",
++		       ret);
++		unregister_trace_android_vh_ra_tuning_max_page(adjust_readahead, NULL);
++		return ret;
++	}
++
++	ret = register_trace_android_vh_should_fault_around(should_fault_around, NULL);
++	if (ret)
++		pr_err("dynamic_readahead: register_trace_android_vh_should_fault_around failed! ret=%d\n",
++		       ret);
++
++	calc_high_wm();
++	return 0;
++}
++
++static void __exit dynamic_readahead_exit(void)
++{
++	unregister_trace_android_vh_should_fault_around(should_fault_around, NULL);
++	unregister_trace_android_vh_ra_tuning_max_page(adjust_readahead, NULL);
++	unregister_trace_android_vh_tune_mmap_readaround(adjust_readaround, NULL);
++}
++
++module_init(dynamic_readahead_init);
++module_exit(dynamic_readahead_exit);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("dynamic readahead tuning (ported from Xiaomi 6.12 ko)");

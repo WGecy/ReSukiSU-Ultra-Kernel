@@ -1,0 +1,40 @@
+From b6a70798200edc63b90f8fdb1dcb2f5f70abc19e Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Fri, 21 Nov 2025 22:18:31 +0800
+Subject: [PATCH] mm/uksm: avoid BUG_ON when allocating node_vma fails
+
+alloc_node_vma() can fail under memory pressure.  Triggering BUG_ON()
+in this case is too harsh because UKSM remains functional with only a
+temporary drop in merging efficiency.
+
+Skip adding the rmap_item to the stable tree when allocation fails
+instead of panicking.  The page will be considered again in later
+scans once memory becomes available.
+
+Change-Id: I6f31e4e970848d890e6a260be321ea68d8d96e40
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ mm/uksm.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index a1ac63b94a550..5815344d45de1 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -2759,7 +2759,15 @@ static void stable_tree_append(struct rmap_item *rmap_item,
+ node_vma_new:
+ 	/* no same vma already in node, alloc a new node_vma */
+ 	new_node_vma = alloc_node_vma();
+-	BUG_ON(!new_node_vma);
++	/*
++	 * Fail to allocate node_vma may cause merging ratio decrease,
++	 * but it can be recovered later when memory is available.
++	 * We should not trigger BUG_ON in such situation.
++	 */
++	if (!new_node_vma) {
++		/* Skip appending this rmap_item to stable_node */
++		return;
++	}
+ 	new_node_vma->head = stable_node;
+ 	new_node_vma->slot = rmap_item->slot;
+ 

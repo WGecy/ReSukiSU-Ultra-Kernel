@@ -1,0 +1,69 @@
+# ============================================
+# Tesla_Kernel 构建配置
+# 参照 zzh20188/GKI_KernelSU_SUSFS 构建流程
+# 修改后运行: python3 build.py
+# ============================================
+
+# ============ 构建基线 ============
+build:
+  android_version: "android15"   # Android 版本 (android12/13/14/15/16)
+  kernel_version: "6.6"          # 内核大版本 (5.10/5.15/6.1/6.6/6.12)
+  # 基线: 6.6.118 = OS4 官方内核 (android15-8 冻结 KMI, 官方 vendor 模块可直接加载)
+  #       6.6.77  = OS3 时代基线 (仅保留兼容, 新功能以 6.6.118 为准)
+  kernel_base: "6.6.118"          # 6.6.77 | 6.6.118 (workflow 按输入覆盖)
+  os_patch_level: "2026-01"      # 自动: 6.6.77=2025-03, 6.6.118=2026-01
+  lts_merge: false               # 不跟随 LTS (只 6.6.77/6.6.118 两个基线)
+  kernel_dir: "build/repo"       # repo 源码目录 (自包含)
+  build_time: "N"                # 自定义构建时间, N=当前UTC; 例: "Sun Dec 01 08:10:00 UTC 2024"
+
+# ============ KSU / SUSFS ============
+# FolkPatch 版: ksu.enabled=false + susfs.enabled=false (纯净内核, 由 FolkPatch App patch boot 注入 root)
+ksu:
+  enabled: true                  # 是否添加 KernelSU (FolkPatch 版关闭)
+  variant: "ReSukiSU"            # 固定 ReSukiSU (内置 SUSFS 支持)
+  # 注: 完整克隆上游 (无 --depth, KSU_VERSION 需要全 git 历史)
+
+susfs:
+  enabled: true                  # 是否应用 SUSFS 补丁 (FolkPatch 版关闭)
+  # 6.6.118 基线自动启用 seccomp PF_EXITING 兼容修复 (防死机)
+
+# ============ 功能开关 (每个独立, true=开 false=关) ============
+# OS3 逆向自建模块 (binder_prio/kshrink_slabd/tesla_guard/dynamic_readahead/mi_wq)
+# 已随 OS4 升级退役 (官方 vendor 模块 KMI 兼容可直接加载), 归档于 patches/11-os3-retired/
+features:
+  # ---- 内存 ----
+  mthp: true                     # mTHP 多尺寸大页
+  lru_gen_export: true           # MGLRU 自启用 (导出 lru_gen 内核 API)
+  uksm: false                    # UKSM 内存去重 — 已禁用: 与 ART GC 冲突致 system_server 崩溃死机 (bugreport 2026-08-10)
+
+  # ---- IO 调度 ----
+  adios: true                    # ADIOS IO 调度器 (设为默认调度器)
+  ufs_fastdiscard: true          # UFS FastDiscard (fstrim 加速)
+  zstd: true                     # zstd 1.5.7 (压缩级别可调)
+
+  # ---- 网络 ----
+  bbr3: true                     # BBRv3 拥塞控制 (全开 17 算法, 默认 bbr3)
+
+  # ---- 驱动/温控 ----
+  cpuidle: true                  # cpuidle/cpufreq 优化
+  thermal_offset: true           # 温控偏移 (游戏防降频, 默认 3°C)
+
+  # ---- 参数调优 ----
+  perf_tune: true                # 性能参数 (mq-deadline 超时/compact/oom)
+  vm_defaults: true              # vm 参数默认值 (watermark=30/swappiness=100)
+
+  # ---- 特殊修复 ----
+  fusebpf: true                  # FUSEBPF 修复 (lookup_revalidate + no-Eexist)
+  zram_lz4kd: true               # zram LZ4 补丁栈 (LZ4 1.10/lz4k/lz4kd)
+  unicode_bypass: true           # Unicode 零宽字符绕过 (需 SUSFS)
+
+  # ---- 安全/防格机 ----
+  cve_fix: true                 # CVE-2026-43499 rtmutex 修复链
+  bbg: false                    # BBG 防格机 (Kconfig 挂载不完整, 保持关闭)
+  lts_fixes: false              # 已移除 (不跟随 LTS)
+  ipset: true                   # ipset 网络支持 (代理分流/防火墙)
+  nomount: true                 # NoMount VFS 文件重定向 (无挂载痕迹)
+
+# ============ zram 配置 (zram_lz4kd 开启时生效) ============
+zram:
+  def_comp: "lz4kd"              # 默认压缩算法 (lz4kd 最佳)

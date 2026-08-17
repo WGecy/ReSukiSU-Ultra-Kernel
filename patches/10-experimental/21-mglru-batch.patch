@@ -1,0 +1,109 @@
+From de4660898b7aa7e03d3b120a6bfa6b26211e4e77 Mon Sep 17 00:00:00 2001
+Subject: mm: mglru: fix stale batch updates after memcg reparenting (6.6 移植)
+
+6.6 移植说明 (与主线差异):
+- 6.6 无 lruvec_lock_irq/lruvec_unlock_irq helper, #else 分支直接用 spin_lock_irq
+- 6.6 的 evict_folios 中 reset_batch_size 原在 lru_lock 锁区内调用,
+  移植后移动到锁外 (与主线一致), 避免 reset_batch_size 内部再次加锁死锁
+- reset_batch_size 签名从 (lruvec, walk) 改为 (walk), 内部自行加锁
+
+---
+--- a/mm/vmscan.c	2026-08-10 20:56:22.881020034 +0800
++++ b/mm/vmscan.c	2026-08-10 20:57:11.283393660 +0800
+@@ -3965,9 +3965,10 @@
+ 	walk->nr_pages[new_gen][type][zone] += delta;
+ }
+ 
+-static void reset_batch_size(struct lruvec *lruvec, struct lru_gen_mm_walk *walk)
++static void reset_batch_size(struct lru_gen_mm_walk *walk)
+ {
+ 	int gen, type, zone;
++	struct lruvec *lruvec = lruvec_live_lock_irq(walk->lruvec);
+ 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+ 
+ 	walk->batched = 0;
+@@ -3987,6 +3988,8 @@
+ 			lru += LRU_ACTIVE;
+ 		__update_lru_size(lruvec, lru, zone, delta);
+ 	}
++
++	spin_unlock_irq(&lruvec->lru_lock);
+ }
+ 
+ static int should_skip_vma(unsigned long start, unsigned long end, struct mm_walk *args)
+@@ -4441,11 +4444,8 @@
+ 
+ 		mem_cgroup_unlock_pages();
+ 
+-		if (walk->batched) {
+-			spin_lock_irq(&lruvec->lru_lock);
+-			reset_batch_size(lruvec, walk);
+-			spin_unlock_irq(&lruvec->lru_lock);
+-		}
++		if (walk->batched)
++			reset_batch_size(walk);
+ 
+ 		cond_resched();
+ 	} while (err == -EAGAIN);
+@@ -5391,14 +5391,16 @@
+ 		list_move(&folio->lru, &clean);
+ 	}
+ 
++	walk = current->reclaim_state->mm_walk;
++	if (walk && walk->batched) {
++		walk->lruvec = lruvec;
++		reset_batch_size(walk);
++	}
++
+ 	spin_lock_irq(&lruvec->lru_lock);
+ 
+ 	move_folios_to_lru(lruvec, &list);
+ 
+-	walk = current->reclaim_state->mm_walk;
+-	if (walk && walk->batched)
+-		reset_batch_size(lruvec, walk);
+-
+ 	item = PGSTEAL_KSWAPD + reclaimer_offset();
+ 	if (!cgroup_reclaim(sc))
+ 		__count_vm_events(item, reclaimed);
+--- a/include/linux/memcontrol.h	2026-08-10 20:56:22.881731626 +0800
++++ b/include/linux/memcontrol.h	2026-08-10 20:56:41.065716419 +0800
+@@ -1385,6 +1385,38 @@
+ 	return &pgdat->__lruvec;
+ }
+ 
++/*
++ * From mainline de4660898b7aa7 ("mm: mglru: fix stale batch updates after
++ * memcg reparenting"): mglru page table walker batches per-generation size
++ * deltas without holding the lruvec lock; the walker can run concurrently
++ * with memcg reparenting, so on a dying memcg redirect the pending batch to
++ * the first non-dying ancestor before flushing under the lruvec lock.
++ */
++static inline struct lruvec *lruvec_live_lock_irq(struct lruvec *lruvec)
++{
++#ifdef CONFIG_MEMCG
++	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
++	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
++
++	rcu_read_lock();
++
++	/*
++	 * The memcg can be NULL when the memory controller is disabled.
++	 * Otherwise, the caller keeps the memcg owning @lruvec alive.
++	 */
++	while (unlikely(memcg && css_is_dying(&memcg->css))) {
++		memcg = parent_mem_cgroup(memcg);
++		lruvec = mem_cgroup_lruvec(memcg, pgdat);
++	}
++
++	spin_lock_irq(&lruvec->lru_lock);
++#else
++	spin_lock_irq(&lruvec->lru_lock);
++#endif
++
++	return lruvec;
++}
++
+ static inline struct lruvec *folio_lruvec_lock_irqsave(struct folio *folio,
+ 		unsigned long *flagsp)
+ {

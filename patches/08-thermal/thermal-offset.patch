@@ -1,0 +1,171 @@
+From 0c17552b48090e61b07f712f8941746ae206c7ba Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Thu, 26 Mar 2026 18:18:44 +0800
+Subject: [PATCH] thermal: add sysctl-based global temperature offset
+
+Add a kernel sysctl named temperature_offset_celsius to apply a
+runtime-configurable global offset to reported temperatures.
+
+Expose the shared helpers through
+include/linux/temp_offset_sysctl.h and register the sysctl from
+kernel/temp_offset_sysctl.c.
+
+Apply the offset to non-battery thermal zones in
+__thermal_zone_get_temp(), whilekeeping battery
+thermal zones unchanged there. Also adjust battery
+power-supply temperature reporting in
+power_supply_get_property()so battery temperature
+can be corrected through the same sysctl.
+
+Change-Id: Idf544ebfc70edaf185c5d9c62a65aa6e73e1a46c
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ drivers/power/supply/power_supply_core.c | 14 ++++++++---
+ drivers/thermal/thermal_helpers.c        |  7 ++++++
+ include/linux/temp_offset_sysctl.h       | 17 +++++++++++++
+ kernel/Makefile                          |  3 ++-
+ kernel/temp_offset_sysctl.c              | 31 ++++++++++++++++++++++++
+ 5 files changed, 68 insertions(+), 4 deletions(-)
+ create mode 100644 include/linux/temp_offset_sysctl.h
+ create mode 100644 kernel/temp_offset_sysctl.c
+
+diff --git a/drivers/power/supply/power_supply_core.c b/drivers/power/supply/power_supply_core.c
+index 05089da9b8eba..2245c17bc464b 100644
+--- a/drivers/power/supply/power_supply_core.c
++++ b/drivers/power/supply/power_supply_core.c
+@@ -20,6 +20,7 @@
+ #include <linux/of.h>
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
++#include <linux/temp_offset_sysctl.h>
+ #include <linux/thermal.h>
+ #include <linux/fixp-arith.h>
+ #include "power_supply.h"
+@@ -1276,6 +1277,7 @@ int power_supply_get_property(struct power_supply *psy,
+ 			    enum power_supply_property psp,
+ 			    union power_supply_propval *val)
+ {
++	int ret;
+ 	if (atomic_read(&psy->use_cnt) <= 0) {
+ 		if (!psy->initialized)
+ 			return -EAGAIN;
+@@ -1283,11 +1285,17 @@ int power_supply_get_property(struct power_supply *psy,
+ 	}
+ 
+ 	if (psy_has_property(psy->desc, psp))
+-		return psy->desc->get_property(psy, psp, val);
++		ret = psy->desc->get_property(psy, psp, val);
+ 	else if (power_supply_battery_info_has_prop(psy->battery_info, psp))
+-		return power_supply_battery_info_get_prop(psy->battery_info, psp, val);
++		ret = power_supply_battery_info_get_prop(psy->battery_info, psp, val);
+ 	else
+-		return -EINVAL;
++		ret = -EINVAL;
++
++	if (ret == 0 && psp == POWER_SUPPLY_PROP_TEMP) {
++		val->intval -= power_supply_temp_offset_deci_c();
++	}
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(power_supply_get_property);
+ 
+diff --git a/drivers/thermal/thermal_helpers.c b/drivers/thermal/thermal_helpers.c
+index 6fdfa7090f685..61aa9e507304e 100644
+--- a/drivers/thermal/thermal_helpers.c
++++ b/drivers/thermal/thermal_helpers.c
+@@ -18,6 +18,7 @@
+ #include <linux/slab.h>
+ #include <linux/string.h>
+ #include <linux/sysfs.h>
++#include <linux/temp_offset_sysctl.h>
+ 
+ #include "thermal_core.h"
+ #include "thermal_trace.h"
+@@ -92,6 +93,12 @@ int __thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
+ 
+ 	ret = tz->ops->get_temp(tz, temp);
+ 
++	if (!ret &&
++		strncasecmp(tz->type, "battery", 7) != 0 &&
++		strncasecmp(tz->type, "batt", 4) != 0) {
++		*temp -= thermal_temp_offset_mc();
++	}
++
+ 	if (IS_ENABLED(CONFIG_THERMAL_EMULATION) && tz->emul_temperature) {
+ 		for (count = 0; count < tz->num_trips; count++) {
+ 			ret = __thermal_zone_get_trip(tz, count, &trip);
+diff --git a/include/linux/temp_offset_sysctl.h b/include/linux/temp_offset_sysctl.h
+new file mode 100644
+index 0000000000000..9b93895af4a45
+--- /dev/null
++++ b/include/linux/temp_offset_sysctl.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_TEMP_OFFSET_SYSCTL_H
++#define _LINUX_TEMP_OFFSET_SYSCTL_H
++
++extern int temperature_offset_celsius;
++
++static inline int thermal_temp_offset_mc(void)
++{
++	return temperature_offset_celsius * 1000;
++}
++
++static inline int power_supply_temp_offset_deci_c(void)
++{
++	return temperature_offset_celsius * 10;
++}
++
++#endif /* _LINUX_TEMP_OFFSET_SYSCTL_H */
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 84e4adadf4ca1..1fa41a8f54a0d 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -15,7 +15,8 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o
++	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o \
++	    temp_offset_sysctl.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MULTIUSER) += groups.o
+diff --git a/kernel/temp_offset_sysctl.c b/kernel/temp_offset_sysctl.c
+new file mode 100644
+index 0000000000000..0cdacba22b279
+--- /dev/null
++++ b/kernel/temp_offset_sysctl.c
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/init.h>
++#include <linux/sysctl.h>
++
++#include <linux/temp_offset_sysctl.h>
++
++int temperature_offset_celsius = 3;	/* GKI2 默认偏移 3°C (防降频) */
++
++static int temperature_offset_min = -100;
++static int temperature_offset_max = 100;
++
++static struct ctl_table temperature_offset_sysctl_table[] = {
++	{
++		.procname	= "temperature_offset_celsius",
++		.data		= &temperature_offset_celsius,
++		.maxlen		= sizeof(temperature_offset_celsius),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= &temperature_offset_min,
++		.extra2		= &temperature_offset_max,
++	},
++	{ }
++};
++
++static int __init temperature_offset_sysctl_init(void)
++{
++	register_sysctl_init("kernel", temperature_offset_sysctl_table);
++	return 0;
++}
++late_initcall(temperature_offset_sysctl_init);

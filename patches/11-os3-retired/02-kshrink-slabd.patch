@@ -1,0 +1,377 @@
+diff --git a/drivers/android/recon/Makefile b/drivers/android/recon/Makefile
+--- a/drivers/android/recon/Makefile
++++ b/drivers/android/recon/Makefile
+@@ -1 +1,2 @@
+ obj-y += binder_prio.o
++obj-y += kshrink_slabd.o
+diff --git a/drivers/android/recon/kshrink_slabd.c b/drivers/android/recon/kshrink_slabd.c
+--- /dev/null
++++ b/drivers/android/recon/kshrink_slabd.c
+@@ -0,0 +1,367 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * kshrink_slabd - MIUI kshrink_slabd.ko 的 6.12 语义 + 6.6 偏移还原
++ *
++ * 逆向来源: 6.12.23-android16-5-gd8653a69a3aa-mi-4k kshrink_slabd.ko
++ *   (/tmp/opencode/vboot/vendor_ramdisk/extract/lib/modules/kshrink_slabd.ko)
++ * 反汇编: /tmp/opencode/kshrink_612.dis (逐条对照)
++ * 6.6 偏移参照: 6.6.57 设备版 kshrink_slabd.ko (/tmp/opencode/kshrink_66.dis):
++ *   [current+0x618] = task->pid (6.12 [current+0x708] = pid@6.12)
++ *   [current+0x44]  = task->flags (6.6/6.12 相同)
++ *   [current+0x620] = stack_canary (编译器栈保护, 无需移植)
++ *
++ * 语义 (6.12, 逐条反汇编):
++ *   should_shrink_async (hook android_vh_shrink_slab_bypass, 0x494-0x53c):
++ *     enabled==0 → *bypass=0 return
++ *     last_jiffies 无条件 = jiffies; 若 current->pid==last_pid → *bypass=0 return
++ *     jiffies-旧last_jiffies <= 0xf9(249) → *bypass=0 return
++ *     *bypass=1; pending==1 → return (保留 bypass)
++ *     保存 memcg/gfp/nid/priority, pending=1, __wake_up(&wq,1,1,NULL)
++ *   wakeup_shrink_slabd (导出, 0x4-0x6c): (gfp,nid,memcg,priority)
++ *     pending==1 → 返回 false; 否则存参数+pending=1+__wake_up, 返回 true
++ *   set_async_slabd_cpus (导出, 0x74-0x1c0):
++ *     已执行过 → return; 扫 possible CPU 找 cpu_scale 最大值集,
++ *     从 online mask 排除, set_cpus_allowed_ptr(kthread, 剩余); 置已执行标志
++ *   kshrink_slabd_func (kthread, 0x1c4-0x48c):
++ *     flags |= PF_KSWAPD|PF_MEMALLOC(0x20800); set_freezable; asp 清零
++ *     while: pending!=1 → prepare_to_wait_event(TASK_KILLABLE) 等
++ *       (pending 置位或信号 → 处理); 处理: set_async_slabd_cpus →
++ *       css.flags&CSS_NO_REF 检查 → css_get → shrink_slab → css_put →
++ *       pending=0 → kthread_should_stop 检查
++ *     退出: flags &= ~0x20800
++ *   init: register hook → init_waitqueue_head → kthread_create_on_node
++ *     → wake_up_process → 存 task → last_pid=task->pid → enabled=1
++ *   exit: unregister hook → printk (原版不 stop kthread)
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/kthread.h>
++#include <linux/wait.h>
++#include <linux/jiffies.h>
++#include <linux/sched.h>
++#include <linux/freezer.h>
++#include <linux/arch_topology.h>
++#include <linux/cpumask.h>
++#include <linux/memcontrol.h>
++#include <linux/cgroup.h>
++#include <trace/hooks/vmscan.h>
++
++#define KSHRINK_THROTTLE_JIFFIES	0xf9	/* 反汇编 0x4d0: cmp x8, #0xf9 */
++
++/*
++ * 原模块 "asp" (.data): hook 传入待回收参数, kthread 消费.
++ * 多 CPU direct reclaim 并发进入 android_vh_shrink_slab_bypass hook,
++ * wakeup_shrink_slabd 也是可被外部并发调用的导出函数; 不加锁会字段撕裂
++ * (gfp/nid/memcg/priority 来自不同 request), 拼贴错误的回收参数.
++ * lock 同时保护 hook/wakeup 写端与 kthread 读端.
++ * 取 spin_lock_irqsave: hook 在 shrink_slab 入口被调, 该处使用
++ * down_read_trylock(&shrinker_rwsem) 是可睡眠锁, 一般为进程上下文,
++ * 但无法完全排除 caller 持有自旋锁进入 direct reclaim 的情形, 保守取 irqsave.
++ */
++static struct {
++	struct mem_cgroup *memcg;	/* asp+0x0: x3/x2 */
++	gfp_t gfp_mask;			/* asp+0x8: w1/w0 */
++	bool pending;			/* asp+0xc */
++	int nid;			/* asp+0x10: w2/w1 */
++	int priority;			/* asp+0x14: w4/w3 */
++	spinlock_t lock;
++} asp;
++
++static wait_queue_head_t shrink_slabd_wait;	/* .data+0x18 */
++
++static bool cpu_set_done;		/* .bss+0x30: set_async_slabd_cpus 已执行 */
++static struct task_struct *shrink_slabd_tsk;	/* .bss+0x38 */
++static u32 last_pid;			/* .bss+0x44: 上次触发回收的 pid */
++static bool slabd_enabled;		/* .bss+0x48 */
++static unsigned long last_jiffies;	/* .bss+0x50 */
++
++extern unsigned long shrink_slab(gfp_t gfp_mask, int nid,
++				 struct mem_cgroup *memcg, int priority);
++
++/*
++ * 反汇编 0x4-0x6c: (gfp=x0, nid=x1, memcg=x2, priority=x3)
++ * 已 pending → 不重复唤醒, 返回 false; 否则保存参数+唤醒, 返回 true
++ *
++ * 注: asp.memcg 在此填入到 kthread css_get 之间无引用计数保护, 依赖调用方
++ * (vmscan shrink_slab 入口) 上下文保证 memcg 引用存活直至 kthread 处理;
++ * 此为 MIUI 原版契约, 需厂商确认. 不在此处 css_get 以保持原语义.
++ */
++bool wakeup_shrink_slabd(gfp_t gfp_mask, int nid,
++			 struct mem_cgroup *memcg, int priority)
++{
++	unsigned long flags;
++	bool kick = false;
++
++	spin_lock_irqsave(&asp.lock, flags);
++	if (!asp.pending) {
++		asp.gfp_mask = gfp_mask;
++		asp.nid = nid;
++		asp.memcg = memcg;
++		asp.priority = priority;
++		asp.pending = true;
++		kick = true;
++	}
++	spin_unlock_irqrestore(&asp.lock, flags);
++
++	/* 0x54: __wake_up(&wq, TASK_NORMAL(1), 1, NULL); 锁外调用避免与
++	 * wait_queue 自带 lock 形成嵌套 (本模块锁序: asp.lock→wq->lock) */
++	if (kick)
++		__wake_up(&shrink_slabd_wait, TASK_NORMAL, 1, NULL);
++
++	return kick;
++}
++
++/*
++ * 反汇编 0x74-0x1c0:
++ * 已执行过 (.bss+0x30) → return
++ * 遍历 __cpu_possible_mask, per_cpu(cpu_scale) 找最大值 CPU 集 (相等累加,
++ * 更大则重置); mask = __cpu_online_mask & ~best_mask; 非空则
++ * set_cpus_allowed_ptr(shrink_slabd_tsk, mask), 置已执行标志
++ */
++void set_async_slabd_cpus(void)
++{
++	unsigned long best_scale = 0;
++	unsigned long best_mask = 0;
++	struct cpumask allowed;
++	int cpu;
++
++	if (cpu_set_done)
++		return;
++
++	for_each_possible_cpu(cpu) {
++		unsigned long s = topology_get_cpu_scale(cpu);
++
++		if (s > best_scale) {
++			best_scale = s;
++			best_mask = 1UL << cpu;
++		} else if (s == best_scale) {
++			best_mask |= 1UL << cpu;
++		}
++	}
++
++	/* 0x18c-0x19c: online & ~best_mask */
++	cpumask_clear(&allowed);
++	for_each_online_cpu(cpu)
++		if (!(best_mask & (1UL << cpu)))
++			cpumask_set_cpu(cpu, &allowed);
++
++	/* 0x1a0: 剩余为空 → 返回 (不置标志) */
++	if (cpumask_empty(&allowed))
++		return;
++
++	/* 0x1ac-0x1b0: set_cpus_allowed_ptr(shrink_slabd_tsk, &allowed) */
++	set_cpus_allowed_ptr(shrink_slabd_tsk, &allowed);
++
++	/* 0x1b4-0x1b8: 置已执行标志 */
++	cpu_set_done = true;
++}
++
++/*
++ * VH 回调 (反汇编 0x494-0x53c)
++ * probe: (data, gfp, nid, memcg, priority, *bypass)
++ */
++static void should_shrink_async(void *data, gfp_t gfp_mask, int nid,
++				struct mem_cgroup *memcg, int priority,
++				bool *bypass)
++{
++	unsigned long now = jiffies;
++	unsigned long old_last;
++	unsigned long flags;
++
++	/* 0x498-0x49c: enabled==0 → *bypass=0 */
++	if (!slabd_enabled) {
++		*bypass = false;
++		return;
++	}
++
++	/* 0x4bc-0x4c4: last_jiffies 无条件更新为 jiffies, 差值用旧值 */
++	old_last = last_jiffies;
++	last_jiffies = now;
++
++	/* 0x4b0-0x4c8: current->pid 与上次值相等 → *bypass=0 (防同一任务反复) */
++	if (current->pid == last_pid) {
++		*bypass = false;
++		return;
++	}
++
++	/* 0x4cc-0x4d4: jiffies-旧值 <= 249 → *bypass=0 (节流) */
++	if (now - old_last <= KSHRINK_THROTTLE_JIFFIES) {
++		*bypass = false;
++		return;
++	}
++
++	/* 0x4e0: *bypass = true (同步回收跳过) */
++	*bypass = true;
++
++	/* 0x4e4-0x528: 临界区内填字段+置 pending; 锁外唤醒 */
++	spin_lock_irqsave(&asp.lock, flags);
++	if (asp.pending) {
++		spin_unlock_irqrestore(&asp.lock, flags);
++		return;
++	}
++	asp.gfp_mask = gfp_mask;
++	asp.nid = nid;
++	asp.memcg = memcg;
++	asp.priority = priority;
++	asp.pending = true;
++	spin_unlock_irqrestore(&asp.lock, flags);
++
++	/* 0x528: __wake_up(&wq, TASK_NORMAL(1), 1, NULL) */
++	__wake_up(&shrink_slabd_wait, TASK_NORMAL, 1, NULL);
++}
++
++static int kshrink_slabd_func(void *unused)
++{
++	struct mem_cgroup *memcg;
++	gfp_t gfp_mask;
++	int nid, priority;
++	unsigned long flags;
++
++	/* 0x200-0x208: current->flags |= PF_KSWAPD|PF_MEMALLOC (0x20800) */
++	current->flags |= PF_KSWAPD | PF_MEMALLOC;
++
++	/* 0x20c */
++	set_freezable();
++
++	/* 0x218-0x224: asp 清零 (kthread 启动早于 hook enable, 但仍用锁保证一致) */
++	spin_lock_irqsave(&asp.lock, flags);
++	asp.memcg = NULL;
++	asp.gfp_mask = 0;
++	asp.nid = 0;
++	asp.priority = 0;
++	asp.pending = false;
++	spin_unlock_irqrestore(&asp.lock, flags);
++
++	/* 0x228-0x22c: 首次 kthread_should_stop 检查 */
++	if (kthread_should_stop())
++		goto exit;
++
++	for (;;) {
++		DEFINE_WAIT(wait);
++
++		/* 0x2ac-0x2b4: pending==1 → 跳过等待直接处理
++		 * 注意: 读 pending 必须在 wait_entry 加入 wait_queue 前完成
++		 * (避免与 producer 的 wake_up race), 用 asp.lock 建立发生顺序 */
++		spin_lock_irqsave(&asp.lock, flags);
++		if (asp.pending) {
++			spin_unlock_irqrestore(&asp.lock, flags);
++		} else {
++			spin_unlock_irqrestore(&asp.lock, flags);
++			/* 0x2b8-0x2cc */
++			init_wait_entry(&wait, 0);
++			for (;;) {
++				/* 0x2d0-0x2dc: state=TASK_KILLABLE(0x2001) */
++				long ret = prepare_to_wait_event(&shrink_slabd_wait,
++								&wait, TASK_KILLABLE);
++
++				/* 0x2e0-0x2e8: pending==1 → finish_wait → 处理 */
++				spin_lock_irqsave(&asp.lock, flags);
++				if (asp.pending) {
++					spin_unlock_irqrestore(&asp.lock, flags);
++					/* 0x2f8-0x300 */
++					finish_wait(&shrink_slabd_wait, &wait);
++					break;
++				}
++				spin_unlock_irqrestore(&asp.lock, flags);
++				/* 0x2ec: prepare 返回非0 (信号) → 处理 */
++				if (ret)
++					break;
++				/* 0x2f0 */
++				schedule();
++			}
++		}
++
++		/* 0x304: 处理前迁移 CPU (首次) */
++		set_async_slabd_cpus();
++
++		/* 0x308-0x310: 锁内拷贝 args 本地, pending 保持, 待处理完才清 */
++		spin_lock_irqsave(&asp.lock, flags);
++		memcg = asp.memcg;
++		gfp_mask = asp.gfp_mask;
++		nid = asp.nid;
++		priority = asp.priority;
++		spin_unlock_irqrestore(&asp.lock, flags);
++
++		/* 0x314-0x318: css->flags & CSS_NO_REF → 跳过保护
++		 * css_get 内部逻辑 (6.6 css_get: if (!(flags&CSS_NO_REF))
++		 * percpu_ref_get) 与反汇编 0x31c-0x368 展开一致 */
++		if (!(memcg->css.flags & CSS_NO_REF))
++			css_get(&memcg->css);
++
++		/* 0x36c-0x37c: shrink_slab(gfp, nid, memcg, priority) */
++		shrink_slab(gfp_mask, nid, memcg, priority);
++
++		/* 0x380-0x384 */
++		if (!(memcg->css.flags & CSS_NO_REF))
++			css_put(&memcg->css);
++
++		/* 0x2a0: pending=0 (锁内清, 释放 producer) */
++		spin_lock_irqsave(&asp.lock, flags);
++		asp.pending = false;
++		spin_unlock_irqrestore(&asp.lock, flags);
++
++		/* 0x2a4-0x2a8: kthread_should_stop → 退出 */
++		if (kthread_should_stop())
++			goto exit;
++	}
++
++exit:
++	/* 0x230-0x240: current->flags &= ~0x20800 */
++	current->flags &= ~(PF_KSWAPD | PF_MEMALLOC);
++	return 0;
++}
++
++static int __init kshrink_init(void)
++{
++	struct task_struct *tsk;
++	int ret;
++
++	/* asp.lock 必须在 hook 注册前就绪, 严格上 slabd_enabled=false
++	 * 期间 hook 会早退, 但仍提前初始化以避免任何窗口 */
++	spin_lock_init(&asp.lock);
++
++	/* 0x18-0x2c */
++	ret = register_trace_android_vh_shrink_slab_bypass(
++			should_shrink_async, NULL);
++	if (ret) {
++		pr_err("shrink_async: register_trace_android_vh_shrink_slab_bypass failed! ret=%d\n", ret);
++		return ret;
++	}
++
++	/* 0x34-0x4c: 反汇编 __init_waitqueue_head(wq, "&shrink_slabd_wait"),
++	 * 6.6 用静态锁键封装 init_waitqueue_head 等价 */
++	init_waitqueue_head(&shrink_slabd_wait);
++
++	/* 0x50-0x68 */
++	tsk = kthread_create_on_node(kshrink_slabd_func, NULL,
++				     NUMA_NO_NODE, "kshrink_slabd");
++	if (IS_ERR(tsk)) {
++		pr_err("shrink_async: Failed to start shrink_slabd on node 0\n");
++		return PTR_ERR(tsk);
++	}
++
++	/* 0x80: wake_up_process → 0x84: 存 task → 0x8c-0xa0: last_pid
++	 * → 0xa4: enabled=1 */
++	wake_up_process(tsk);
++	shrink_slabd_tsk = tsk;
++	last_pid = tsk->pid;
++	slabd_enabled = true;
++
++	return 0;
++}
++
++static void __exit kshrink_exit(void)
++{
++	/* 0x10-0x24: unregister (原版不 stop kthread) */
++	unregister_trace_android_vh_shrink_slab_bypass(
++			should_shrink_async, NULL);
++	/* 0x28-0x30 */
++	pr_info("shrink_async: shrink_async exit succeed!\n");
++}
++
++module_init(kshrink_init);
++module_exit(kshrink_exit);
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("async shrink_slab daemon (6.12 semantics + 6.6 offsets, based on MIUI kshrink_slabd.ko 6.12.23)");

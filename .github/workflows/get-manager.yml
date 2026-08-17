@@ -1,0 +1,39 @@
+name: GetManager
+
+# 从 ReSukiSU-Ultra 仓库拉取管理器 APK (公开 release, 匿名可下载)
+# 注意: 需要 ReSukiSU-Ultra 仓库先打 tag (v*) 触发 release 发布
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+
+jobs:
+  get_ksu_manager:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: 下载管理器 APK (ReSukiSU-Ultra 最新 release)
+        continue-on-error: true
+        run: |
+          mkdir -p manager
+          # 获取最新 release 的 APK 下载地址 (公开仓库匿名可访问)
+          ASSETS=$(curl -s "https://api.github.com/repos/pengzenzen-creator/ReSukiSU-Ultra/releases/latest" | jq -r '.assets[].browser_download_url' | grep -i "\.apk$")
+          if [ -z "$ASSETS" ]; then
+            echo "::warning::ReSukiSU-Ultra 无 release 资产, 请先给 ReSukiSU-Ultra 打 tag (v*) 发布"
+            exit 0
+          fi
+          echo "$ASSETS" | xargs -I{} curl -sL {} -o manager/$(basename {})
+          ls -la manager/
+
+      - name: 上传管理器 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: manager-apk
+          path: manager/*.apk
+          if-no-files-found: warn

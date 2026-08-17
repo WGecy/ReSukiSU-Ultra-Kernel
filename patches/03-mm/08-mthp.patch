@@ -1,0 +1,21 @@
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 73c62e1cce98..92a1062a66e8 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -649,8 +649,15 @@
+ 	 * disable all other sizes. powerpc's PMD_ORDER isn't a compile-time
+ 	 * constant so we have to do this here.
+ 	 */
+-	if (!anon_orders_configured)
++	if (!anon_orders_configured) {
+ 		huge_anon_orders_inherit = BIT(PMD_ORDER);
++#ifdef CONFIG_ARM64_4K_PAGES
++		/* 32K/64K mTHP (order 3/4 on 4K pages) for both always and
++		 * madvise so MADV_NOHUGEPAGE can still opt out. */
++		huge_anon_orders_always |= BIT(3) | BIT(4);
++		huge_anon_orders_madvise |= BIT(3) | BIT(4);
++#endif
++	}
+ 
+ 	*hugepage_kobj = kobject_create_and_add("transparent_hugepage", mm_kobj);
+ 	if (unlikely(!*hugepage_kobj)) {

@@ -1,0 +1,100 @@
+name: 内核构建 - Android 15 (6.6)
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "内核版本 (6.6.77 / 6.6.118 / 全部)"
+        required: true
+        type: choice
+        options:
+          - "all"
+          - "6.6.77"
+          - "6.6.118"
+        default: "all"
+      enable_susfs:
+        description: "启用 SUSFS"
+        required: false
+        type: boolean
+        default: true
+      use_zram:
+        description: "启用 ZRAM 增强 (lz4kd)"
+        required: false
+        type: boolean
+        default: true
+      use_bbg:
+        description: "启用 BBG 防格机"
+        required: false
+        type: boolean
+        default: false
+      cve_2026_43499_patch:
+        description: "应用 CVE-2026-43499 rtmutex 修复链"
+        required: false
+        type: boolean
+        default: true
+      build_time:
+        description: "自定义构建时间 (N或留空=当前UTC)"
+        required: false
+        type: string
+        default: "N"
+
+jobs:
+  # ==================== 读取版本矩阵 ====================
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read and Parse 6.6.json Matrix
+        id: set-matrix
+        run: |
+          VERSION_FILTER="${{ inputs.version }}"
+          MATRIX_JSON=$(jq -c '
+            [ .entries[] | { sub_level: (.kernel | split(".") | .[2]), os_patch_level: .date } ]
+          ' ./data/android15/6.6.json)
+
+          # 按输入过滤版本
+          if [ "$VERSION_FILTER" != "all" ]; then
+            FILTER_SUB=$(echo "$VERSION_FILTER" | cut -d'.' -f3)
+            MATRIX_JSON=$(echo "$MATRIX_JSON" | jq -c --arg sub "$FILTER_SUB" '[ .[] | select(.sub_level == $sub) ]')
+          fi
+
+          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
+
+  # ==================== 构建内核 ====================
+  build-kernels-a15-6-6:
+    needs: prepare-matrix
+    name: "6.6.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs['prepare-matrix'].outputs.matrix) }}
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: "android15"
+      kernel_version: "6.6"
+      sub_level: ${{ matrix.sub_level }}
+      os_patch_level: ${{ matrix.os_patch_level }}
+      ksu_branch: "main"
+      version: ${{ inputs.version || '' }}
+      build_time: ${{ inputs.build_time }}
+      enable_susfs: ${{ inputs.enable_susfs }}
+      use_zram: ${{ inputs.use_zram }}
+      use_bbg: ${{ inputs.use_bbg }}
+      cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
+
+  # ==================== 拉取管理器 APK ====================
+  get-ksu-manager:
+    uses: ./.github/workflows/get-manager.yml
+    secrets: inherit

@@ -1,0 +1,19 @@
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 104381b7d4e2..0b1bc29d33e7 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -5504,12 +5504,10 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, bool
+ 	if (!should_run_aging(lruvec, max_seq, sc, can_swap, &nr_to_scan))
+ 		return nr_to_scan;
+ 
+-	/* skip the aging path at the default priority */
++	/* 7.2 移植 (12316f79): aging 后不立即 abort, 继续扫一批利用新暴露的冷页 */
+ 	if (sc->priority == DEF_PRIORITY)
+ 		return nr_to_scan;
+-
+-	/* skip this lruvec as it's low on cold folios */
+-	return try_to_inc_max_seq(lruvec, max_seq, sc, can_swap, false) ? -1 : 0;
++	return try_to_inc_max_seq(lruvec, max_seq, sc, can_swap, false) ? nr_to_scan : 0;
+ }
+ 
+ static bool should_abort_scan(struct lruvec *lruvec, struct scan_control *sc)

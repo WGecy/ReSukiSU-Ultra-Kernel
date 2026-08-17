@@ -1,0 +1,35 @@
+From db864c78a372c4c3c3979eb39d6fd4ebdda302b2 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Wed, 30 Jul 2025 01:13:37 +0800
+Subject: [PATCH] mm: uksm: Add fallback allocation for slot_tree_node_alloc
+
+In slot_tree_node_alloc(), if the initial kmem_cache_zalloc() with
+GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN fails, attempt a second
+allocation with only GFP_KERNEL. This improves allocation reliability
+under memory pressure by retrying without the restrictive flags.
+
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ mm/uksm.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index e2777b7c8fb6d..5d14d0f2ac787 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -224,8 +224,13 @@ static struct sradix_tree_node *slot_tree_node_alloc(void)
+ {
+ 	struct slot_tree_node *p;
+ 
+-	p = kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL |
+-			      __GFP_NORETRY | __GFP_NOWARN);
++	p = kmem_cache_zalloc(slot_tree_node_cachep, 
++						 GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN);
++
++	if (!p) {
++		p = kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL);
++	}
++
+ 	if (!p)
+ 		return NULL;
+ 

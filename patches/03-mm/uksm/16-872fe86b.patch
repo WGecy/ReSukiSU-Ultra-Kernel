@@ -1,0 +1,39 @@
+From 872fe86b003667e3054ca958038762d67f27aab0 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Sun, 10 Aug 2025 19:54:34 +0800
+Subject: [PATCH] mm: uksm: Set CPU affinity for uksmd thread
+
+Set the CPU affinity of the uksmd thread to CPUs 0-5.
+
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ mm/uksm.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index 9fa95a01e65fc..1a99f42b8a10f 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -5781,6 +5781,22 @@ static int __init uksm_init(void)
+ 		goto out_free;
+ 	}
+ 
++	/* Set uksmd thread CPU affinity to CPUs 0-5 and priority to 19 */
++	{
++		cpumask_var_t cpus_mask;
++		if (alloc_cpumask_var(&cpus_mask, GFP_KERNEL)) {
++			cpumask_clear(cpus_mask);
++			cpumask_set_cpu(0, cpus_mask);
++			cpumask_set_cpu(1, cpus_mask);
++			cpumask_set_cpu(2, cpus_mask);
++			cpumask_set_cpu(3, cpus_mask);
++			cpumask_set_cpu(4, cpus_mask);
++			cpumask_set_cpu(5, cpus_mask);
++			set_cpus_allowed_ptr(uksm_thread, cpus_mask);
++			free_cpumask_var(cpus_mask);
++		}
++	}
++
+ #ifdef CONFIG_SYSFS
+ 	err = sysfs_create_group(mm_kobj, &uksm_attr_group);
+ 	if (err) {

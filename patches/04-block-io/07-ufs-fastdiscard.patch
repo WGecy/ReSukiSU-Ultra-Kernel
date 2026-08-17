@@ -1,0 +1,267 @@
+diff --git a/drivers/scsi/recon/ufs_fastdiscard.c b/drivers/scsi/recon/ufs_fastdiscard.c
+--- /dev/null
++++ b/drivers/scsi/recon/ufs_fastdiscard.c
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * ufs_fastdiscard - UFS FastDiscard 特性内建 (6.6 移植)
++ *
++ * 移植自: OnePlus SM8750 oplus_ufs_fastdiscard (GPL-2.0-only, 2025-2026 Oplus)
++ *   原始路径: vendor/oplus/kernel/storage/storage_feature_in_module/
++ *             common/oplus_ufs_fastdiscard/oplus_ufs_fastdiscard.c
++ * 移植目标: T-Kernel 6.6.142 (GKI)
++ *
++ * 原理: UFS 支持一次 UNMAP 命令携带多个段描述符 (VPD 0xB0 的
++ *   max_unmap_block_desc_count), 但内核默认 blk_queue_max_discard_segments=1,
++ *   导致 fstrim 一次只回收 1 段, 速度慢。
++ *   本模块:
++ *   1. hook android_vh_sd_init_unmap_multi_segment: sd 初始化时读设备
++ *      VPD 0xB0[24] 的 max_unmap_block_desc_count 记录设备能力
++ *   2. hook android_vh_sd_setup_unmap_multi_segment: UNMAP 命令构造时,
++ *      把请求内多个 bio 段全部写入 descriptor 区 (每段 16 字节),
++ *      并解除 queue_max_discard_segments=1 限制
++ *   3. /proc/ufs_feature/fastdiscard_en 开关 (1=开启)
++ *      /proc/ufs_feature/dev_max_discard_segments 设备能力 (只读)
++ *
++ * 6.6 兼容性验证 (2026-08-07):
++ *   - android_vh_sd_* 两个 hook 存在于 include/trace/hooks/sd.h 且导出
++ *   - sd.c:916/3090 调用点存在, 签名一致 (cmd,buf)/(sdkp,vpd)
++ *   - scsi_cmd_to_rq / rq->q / blk_rq_nr_discard_segments /
++ *     queue_max_discard_segments / vpd_pgb0 / sectors_to_logical /
++ *     put_unaligned_be* 全部可用
++ *   - 仅变更: 模块命名 + 去掉 DDK 专属头, 逻辑与 oplus 一致
++ */
++
++#include <linux/blk_types.h>
++#include <linux/fs.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/version.h>
++#include <trace/hooks/sd.h>
++#include <scsi/scsi_proto.h>
++#include <scsi/scsi_cmnd.h>
++#include <asm-generic/unaligned.h>
++#include "../sd.h"
++
++#define UFS_FEATURE_DIR "ufs_feature"
++#define FASTDISCARD_DIR "fastdiscard_en"
++#define MULTI_DISCARD_SEGMENTS_DIR "dev_max_discard_segments"
++
++static bool fastdiscard_en = true;	/* 默认开启 (多段 UNMAP 加速 fstrim) */
++static unsigned int dev_max_discard_segments = 1;
++
++static ssize_t fastdiscard_proc_write(struct file *file,
++	const char __user *buffer, size_t count, loff_t *ppos)
++{
++	int ret = 0;
++
++	ret = kstrtobool_from_user(buffer, count, &fastdiscard_en);
++	if (ret)
++		pr_err("update fastdiscard status failed!\n");
++
++	fastdiscard_en = !!fastdiscard_en;
++
++	return count;
++}
++
++static int fastdiscard_proc_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", fastdiscard_en);
++
++	return 0;
++}
++
++static int fastdiscard_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fastdiscard_proc_show, NULL);
++}
++
++static const struct proc_ops fastdiscard_proc_ops = {
++	.proc_open	= fastdiscard_proc_open,
++	.proc_read	= seq_read,
++	.proc_lseek	= seq_lseek,
++	.proc_release	= single_release,
++	.proc_write	= fastdiscard_proc_write,
++};
++
++static int multi_discard_segments_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%d\n", dev_max_discard_segments);
++
++	return 0;
++}
++
++static int multi_discard_segments_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, multi_discard_segments_show, NULL);
++}
++
++static const struct proc_ops multi_discard_segments_proc_ops = {
++	.proc_open	= multi_discard_segments_open,
++	.proc_read	= seq_read,
++	.proc_lseek	= seq_lseek,
++	.proc_release	= single_release,
++};
++
++static int __init proc_ufs_fastdiscard_init(void)
++{
++	struct proc_dir_entry *ufs_feature, *fastdiscard,
++		*multi_discard_segments;
++	int ret = 0;
++
++	ufs_feature = proc_mkdir(UFS_FEATURE_DIR, NULL);
++	if (!ufs_feature) {
++		pr_err("Failed to create ufs_feature procfs\n");
++		return -EFAULT;
++	}
++
++	fastdiscard = proc_create(FASTDISCARD_DIR, 0644,
++		ufs_feature, &fastdiscard_proc_ops);
++	if (!fastdiscard) {
++		remove_proc_entry(UFS_FEATURE_DIR, NULL);
++		pr_err("Failed to create fastdiscard enable procfs\n");
++		return -EFAULT;
++	}
++
++	multi_discard_segments = proc_create(MULTI_DISCARD_SEGMENTS_DIR, 0444,
++		ufs_feature, &multi_discard_segments_proc_ops);
++	if (!multi_discard_segments) {
++		remove_proc_subtree(UFS_FEATURE_DIR, NULL);
++		pr_err("Failed to create multi_discard_segments procfs\n");
++		return -EFAULT;
++	}
++
++	return ret;
++}
++
++static void sd_vh_setup_unmap_multi_segment(void *data,
++	struct scsi_cmnd *cmd, char *buf)
++{
++	struct request *rq = scsi_cmd_to_rq(cmd);
++	struct request_queue *q = rq->q;
++	unsigned short segments = blk_rq_nr_discard_segments(rq);
++	struct scsi_device *sdp = cmd->device;
++	struct scsi_vpd *vpd;
++
++	if (segments > 1) {
++		unsigned int data_len = 8 + 16 * segments;
++		struct bio *bio;
++		unsigned int descriptor_offset = 8;
++		u64 lba = sectors_to_logical(sdp, blk_rq_pos(rq));
++		u32 nr_blocks = sectors_to_logical(sdp, blk_rq_sectors(rq));
++
++		put_unaligned_be16(data_len, &cmd->cmnd[7]);
++
++		/* update data len */
++		rq->special_vec.bv_len = data_len;
++		put_unaligned_be16(6 + 16 * segments, &buf[0]);
++		put_unaligned_be16(16 * segments, &buf[2]);
++
++		__rq_for_each_bio(bio, rq) {
++			lba = sectors_to_logical(sdp, bio->bi_iter.bi_sector);
++			nr_blocks = sectors_to_logical(sdp, bio_sectors(bio));
++
++			put_unaligned_be64(lba, &buf[descriptor_offset]);
++			put_unaligned_be32(nr_blocks, &buf[descriptor_offset + 8]);
++			descriptor_offset += 16;
++		}
++	}
++
++	if (fastdiscard_en == 0) {
++		/* disable fastdiscard, it need to set max discard segments to 1 */
++		if (queue_max_discard_segments(q) > 1)
++			blk_queue_max_discard_segments(q, 1);
++	} else if (fastdiscard_en == 1 && queue_max_discard_segments(q) == 1) {
++		rcu_read_lock();
++		vpd = rcu_dereference(sdp->vpd_pgb0);
++		if (dev_max_discard_segments != get_unaligned_be32(&vpd->data[24])) {
++			WARN_ON(1);
++			dev_max_discard_segments = get_unaligned_be32(&vpd->data[24]);
++		}
++		rcu_read_unlock();
++		if (dev_max_discard_segments != 1)
++			blk_queue_max_discard_segments(q, dev_max_discard_segments);
++	}
++}
++
++static void sd_vh_init_unmap_multi_segment(void *data,
++	struct scsi_disk *sdkp, struct scsi_vpd *vpd)
++{
++	unsigned int max_unmap_block_desc_count =
++		get_unaligned_be32(&vpd->data[24]);
++
++	if (max_unmap_block_desc_count > 1)
++		dev_max_discard_segments = max_unmap_block_desc_count;
++}
++
++static int __init ufs_fastdiscard_init(void)
++{
++	int ret = 0;
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
++	ret = proc_ufs_fastdiscard_init();
++	if (ret) {
++		pr_err("%s failed, ret = %d", __func__, ret);
++		goto exit;
++	}
++
++	ret = register_trace_android_vh_sd_setup_unmap_multi_segment(
++			sd_vh_setup_unmap_multi_segment, NULL);
++	if (ret < 0) {
++		pr_err("register_trace_android_vh_sd_setup_unmap_multi_segment failed, ret = %d",
++			ret);
++		goto exit;
++	}
++
++	ret = register_trace_android_vh_sd_init_unmap_multi_segment(
++			sd_vh_init_unmap_multi_segment, NULL);
++	if (ret < 0) {
++		unregister_trace_android_vh_sd_setup_unmap_multi_segment(
++			sd_vh_setup_unmap_multi_segment, NULL);
++		pr_err("register_trace_android_vh_sd_init_unmap_multi_segment failed, ret = %d",
++			ret);
++		goto exit;
++	}
++
++	pr_info("ufs_fastdiscard init succeed\n");
++
++exit:
++#else
++	pr_info("kernel version < 6.6, no need to init ufs_fastdiscard\n");
++#endif
++	return ret;
++}
++
++static void __exit ufs_fastdiscard_exit(void)
++{
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
++	remove_proc_subtree(UFS_FEATURE_DIR, NULL);
++	unregister_trace_android_vh_sd_setup_unmap_multi_segment(
++		sd_vh_setup_unmap_multi_segment, NULL);
++	unregister_trace_android_vh_sd_init_unmap_multi_segment(
++		sd_vh_init_unmap_multi_segment, NULL);
++
++	pr_info("ufs_fastdiscard exit succeed\n");
++#endif
++}
++
++module_init(ufs_fastdiscard_init);
++module_exit(ufs_fastdiscard_exit);
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("UFS FastDiscard: enable multi-segment UNMAP for faster fstrim (ported from Oplus)");
+diff --git a/drivers/scsi/recon/Makefile b/drivers/scsi/recon/Makefile
+new file mode 100644
+index 000000000000..98ad3bfd6783
+--- /dev/null
++++ b/drivers/scsi/recon/Makefile
+@@ -0,0 +1 @@
++obj-y += ufs_fastdiscard.o
+diff --git a/drivers/scsi/Makefile b/drivers/scsi/Makefile
+index f055bfd54a68..e8411a28a1df 100644
+--- a/drivers/scsi/Makefile
++++ b/drivers/scsi/Makefile
+@@ -205,3 +205,4 @@ $(obj)/53c700_d.h: $(src)/53c700.scr $(src)/script_asm.pl
+ 	$(PERL) -s $(src)/script_asm.pl -ncr7x0_family $@ $(@:_d.h=_u.h) < $<
+ 
+ endif
++obj-y += recon/

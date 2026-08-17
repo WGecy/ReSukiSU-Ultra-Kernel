@@ -1,0 +1,34 @@
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 30e36e0e662d..17ea8a4ac02b 100644
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -27,13 +27,13 @@
+ /*
+  * See Documentation/block/deadline-iosched.rst
+  */
+-static const int read_expire = HZ / 2;  /* max time before a read is submitted. */
+-static const int write_expire = 5 * HZ; /* ditto for writes, these limits are SOFT! */
++static const int read_expire = 4 * HZ / 1000;  /* max time before a read is submitted. */
++static const int write_expire = 8 * HZ / 1000; /* ditto for writes, these limits are SOFT! */
+ /*
+  * Time after which to dispatch lower priority requests even if higher
+  * priority requests are pending.
+  */
+-static const int prio_aging_expire = 10 * HZ;
++static const int prio_aging_expire = 200 * HZ / 1000;
+ static const int writes_starved = 2;    /* max times reads can starve a write */
+ static const int fifo_batch = 16;       /* # of sequential requests treated as one
+ 				     by the above parameters. For throughput. */
+diff --git a/fs/f2fs/checkpoint.c b/fs/f2fs/checkpoint.c
+index 15dc0c3ee33a..62046f0fb351 100644
+--- a/fs/f2fs/checkpoint.c
++++ b/fs/f2fs/checkpoint.c
+@@ -24,7 +24,7 @@
+ 
+ EXPORT_TRACEPOINT_SYMBOL_GPL(f2fs_write_checkpoint);
+ 
+-#define DEFAULT_CHECKPOINT_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 3))
++#define DEFAULT_CHECKPOINT_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 3))
+ 
+ static struct kmem_cache *ino_entry_slab;
+ struct kmem_cache *f2fs_inode_entry_slab;

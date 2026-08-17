@@ -1,0 +1,69 @@
+From dd57dd9ae2785d10b2da81bcf304bb6745109cb6 Mon Sep 17 00:00:00 2001
+From: brokestar233 <3765589194@qq.com>
+Date: Thu, 15 Jan 2026 18:00:13 +0800
+Subject: [PATCH] mm/uksm: fix potential use-after-free in uksm_do_scan busy
+ retry path
+
+When uksm_do_scan() encounters -EBUSY and enters the busy retry loop,
+it may dereference iter->vma->vm_mm after the corresponding vma_slot
+has already been freed (especially under concurrent unmap/madvise/etc.).
+
+This happens because neither the slot nor the vma is guaranteed to
+remain alive between iterations of the inner do-while loop.
+
+Fix this by:
+1. Taking vma_slot_list_lock before accessing iter->vma
+2. Safely reading vm_mm under the lock
+3. Only comparing the saved mm pointer outside the lock
+
+This prevents a possible KASAN use-after-free splat in the busy
+retry path.
+
+Change-Id: I03f82bf717a96fc07207d13d6442bd9980173dd6
+Signed-off-by: brokestar233 <3765589194@qq.com>
+---
+ mm/uksm.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/mm/uksm.c b/mm/uksm.c
+index 5815344d45de1..09da2f7cc58fe 100644
+--- a/mm/uksm.c
++++ b/mm/uksm.c
+@@ -4728,17 +4728,35 @@ static noinline void uksm_do_scan(void)
+ 			busy_mm = slot->mm;
+ 
+ 			if (err == -EBUSY) {
++				struct mm_struct *iter_mm = NULL;
++
+ 				/* skip other vmas on the same mm */
+ 				do {
+ 					reset = advance_current_scan(rung);
+ 					iter = rung->current_scan;
+ 					busy_retry--;
+-					if (iter->vma->vm_mm != busy_mm ||
++
++					/* 
++					 * FIX: KASAN use-after-free protection.
++					 * We must hold vma_slot_list_lock to ensure the slot/vma 
++					 * is not freed concurrently before dereferencing vm_mm.
++					 */
++					spin_lock(&vma_slot_list_lock);
++					if (slot_in_uksm(iter)) {
++						iter_mm = iter->vma->vm_mm;
++					} else {
++						/* Slot removed/dead, treat as mismatch to break loop safely */
++						iter_mm = NULL;
++					}
++					spin_unlock(&vma_slot_list_lock);
++
++					/* Check against the safely retrieved iter_mm */
++					if (iter_mm != busy_mm ||
+ 					    !busy_retry || reset)
+ 						break;
+ 				} while (1);
+ 
+-				if (iter->vma->vm_mm != busy_mm) {
++				if (iter_mm != busy_mm) {
+ 					continue;
+ 				} else {
+ 					/* scan round finsished */

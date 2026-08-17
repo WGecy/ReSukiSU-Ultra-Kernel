@@ -1,0 +1,29 @@
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 104381b7d4e2..3b5ad0e8e7d9 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3365,6 +3365,7 @@ DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
+ DEFINE_STATIC_KEY_ARRAY_FALSE(lru_gen_caps, NR_LRU_GEN_CAPS);
+ #define get_cap(cap)	static_branch_unlikely(&lru_gen_caps[cap])
+ #endif
++EXPORT_SYMBOL(lru_gen_caps);
+ 
+ static bool should_walk_mmu(void)
+ {
+@@ -5865,7 +5866,7 @@ static bool drain_evictable(struct lruvec *lruvec)
+ 	return true;
+ }
+ 
+-static void lru_gen_change_state(bool enabled)
++void lru_gen_change_state(bool enabled)
+ {
+ 	static DEFINE_MUTEX(state_mutex);
+ 
+@@ -5915,6 +5916,7 @@ static void lru_gen_change_state(bool enabled)
+ 	cpus_read_unlock();
+ 	cgroup_unlock();
+ }
++EXPORT_SYMBOL(lru_gen_change_state);
+ 
+ /******************************************************************************
+  *                          sysfs interface
