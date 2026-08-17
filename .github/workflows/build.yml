@@ -208,23 +208,23 @@ jobs:
           mkdir -p $COMMON/arch/arm64/configs
           # 固定项 (KSU/ADIOS/ipset/netisolate/fusebpf 等)
           cat > $FRAG << 'FRAG_EOF'
-CONFIG_KSU=y
-CONFIG_KSU_NETISOLATE=y
-CONFIG_KSU_FUSEBPF_FIX=y
-CONFIG_IP_SET=y
-CONFIG_IP_SET_BITMAP_IP=y
-CONFIG_IP_SET_HASH_IP=y
-CONFIG_IP_SET_HASH_IPPORT=y
-CONFIG_IP_SET_HASH_IPPORTIP=y
-CONFIG_IP_SET_HASH_IPPORTNET=y
-CONFIG_IP_SET_HASH_NET=y
-CONFIG_IP_SET_HASH_NETPORT=y
-CONFIG_NETFILTER_XT_SET=y
-CONFIG_MQ_IOSCHED_ADIOS=y
-CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
-CONFIG_LRU_GEN=y
-CONFIG_LRU_GEN_ENABLED=y
-FRAG_EOF
+          CONFIG_KSU=y
+          CONFIG_KSU_NETISOLATE=y
+          CONFIG_KSU_FUSEBPF_FIX=y
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_MQ_IOSCHED_ADIOS=y
+          CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
+          CONFIG_LRU_GEN=y
+          CONFIG_LRU_GEN_ENABLED=y
+          FRAG_EOF
           echo "fragment 生成: $(wc -l < $FRAG) 项"
 
       # ==================== 编译内核 (kleaf bazel) ====================
