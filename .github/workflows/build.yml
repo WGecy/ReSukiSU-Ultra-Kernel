@@ -324,6 +324,23 @@ jobs:
           enable_config_if_defined CONFIG_LRU_GEN
           enable_config_if_defined CONFIG_LRU_GEN_ENABLED
 
+          # ===== zram (内建 + lz4kd 默认 + 算法, 参考 GKI_KernelSU_SUSFS) =====
+          if [ "${{ inputs.use_zram }}" == "true" ]; then
+            enable_config_if_defined CONFIG_ZRAM
+            enable_config_if_defined CONFIG_ZSMALLOC
+            # 默认压缩 lz4kd (choice 原位替换)
+            if config_defined CONFIG_ZRAM_DEF_COMP_LZ4KD; then
+              sed -i 's/^CONFIG_ZRAM_DEF_COMP_[A-Z0-9]*=y$/CONFIG_ZRAM_DEF_COMP_LZ4KD=y/' $DEFCONFIG
+              grep -q '^CONFIG_ZRAM_DEF_COMP_LZ4KD=y' $DEFCONFIG || echo 'CONFIG_ZRAM_DEF_COMP_LZ4KD=y' >> $DEFCONFIG
+              echo "  zram 默认压缩: lz4kd"
+            fi
+            # zram.config 算法片段 (LZ4HC/LZ4K/LZ4KD/842/OPLUS)
+            while IFS='=' read -r key val; do
+              case "$key" in CONFIG_*) enable_config_if_defined "$key";; esac
+            done < $GITHUB_WORKSPACE/third_party/zram-stack/zram.config
+            echo "  zram 算法配置完成"
+          fi
+
           # SUSFS 配置 (参考 GKI_KernelSU_SUSFS)
           if [ "${{ inputs.enable_susfs }}" == "true" ]; then
             cat >> $DEFCONFIG << 'SUSFS_EOF'
