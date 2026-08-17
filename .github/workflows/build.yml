@@ -101,6 +101,15 @@ jobs:
             build-essential libssl-dev bison flex libelf-dev dwarves \
             openssl zip unzip bc kmod cpio jq openjdk-17-jdk-headless ccache
 
+      # ==================== bazel 磁盘缓存 (提速关键, 参考 GKI_KernelSU_SUSFS) ====================
+      - name: 恢复 bazel 磁盘缓存
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/bazel
+          key: bazel-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
+          restore-keys: |
+            bazel-${{ inputs.kernel_version }}-${{ inputs.sub_level }}-
+
       # ==================== 拉取内核源码 (repo manifest, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 初始化并同步内核源码
         run: |
@@ -273,10 +282,12 @@ jobs:
             echo "SUSFS CONFIG 已追加"
           fi
 
-          # 生成 fragment (diff defconfig vs .orig)
-          diff -u $DEFCONFIG.orig $DEFCONFIG | grep '^+CONFIG_' | cut -c2- > $FRAG
+          # 生成 fragment (diff defconfig vs .orig, 参考 GKI_KernelSU_SUSFS)
+          diff "$DEFCONFIG.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > $FRAG || true
+          # 还原 defconfig (fragment 作为增量, 避免 trim 检查)
+          cp $DEFCONFIG.orig $DEFCONFIG
           echo "fragment 生成: $(wc -l < $FRAG) 项"
-          head -30 $FRAG
+          head -40 $FRAG
 
       # ==================== 编译内核 (kleaf bazel, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 编译内核
@@ -287,7 +298,8 @@ jobs:
           sed -i 's/check_defconfig//' common/build.config.gki
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
           sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
-          tools/bazel build --config=fast --lto=thin \
+          tools/bazel build --disk_cache=/home/runner/.cache/bazel \
+            --config=fast --lto=thin \
             --defconfig_fragment=//common:arch/arm64/configs/tesla.fragment \
             //common:kernel_aarch64_dist
           test -f bazel-bin/common/kernel_aarch64/Image && echo "Image OK"
@@ -310,9 +322,22 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
+      # ==================== 自动发布 Release ====================
+      - name: 删除旧 Release
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          gh release delete kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }} \
+            --repo ${{ github.repository }} --yes --cleanup-tag
+
       - name: 发布 Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
+          name: "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
+          body: |
+            自动构建内核产物 (ReSukiSU-Ultra 分支)
+            - 版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
           files: out/*.zip
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
