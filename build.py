@@ -136,8 +136,8 @@ class Builder:
             if (src / "kernel-build-tools" / "linux-x86").exists():
                 shutil.copytree(src / "kernel-build-tools", tc / "kernel-build-tools")
             else:
-                for url, name in [("https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/prebuilts/build-tools", "tuna"),
-                                  ("https://android.googlesource.com/kernel/prebuilts/build-tools", "google")]:
+                for url, name in [("https://android.googlesource.com/kernel/prebuilts/build-tools", "google"),
+                                  ("https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/prebuilts/build-tools", "tuna")]:
                     r = run(f"git clone --depth 1 --single-branch -b {br} {url} {tc/'kernel-build-tools'}", check=False, timeout=1800)
                     if r.returncode == 0:
                         Log.ok(f"来自 {name}")
@@ -148,8 +148,8 @@ class Builder:
             if (src / "mkbootimg" / "mkbootimg.py").exists():
                 shutil.copytree(src / "mkbootimg", tc / "mkbootimg")
             else:
-                for url, name in [("https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/platform/system/tools/mkbootimg", "tuna"),
-                                  ("https://android.googlesource.com/platform/system/tools/mkbootimg", "google")]:
+                for url, name in [("https://android.googlesource.com/platform/system/tools/mkbootimg", "google"),
+                                  ("https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/platform/system/tools/mkbootimg", "tuna")]:
                     r = run(f"git clone --depth 1 --single-branch -b {br} {url} {tc/'mkbootimg'}", check=False, timeout=600)
                     if r.returncode == 0:
                         Log.ok(f"来自 {name}")
