@@ -22,8 +22,8 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p manager
-          # latest/download 直连 (固定资产名, 无需 API 不触发限流)
-          curl -sL "https://github.com/pengzenzen-creator/ReSukiSU-Ultra/releases/latest/download/ReSukiSU-Ultra-universal.apk" -o manager/ReSukiSU-Ultra-universal.apk
+          # 固定 tag + 固定名直连 (无需 API 不触发限流, prerelease 也适用)
+          curl -sL "https://github.com/pengzenzen-creator/ReSukiSU-Ultra/releases/download/v4.3.0-latest/ReSukiSU-Ultra-universal.apk" -o manager/ReSukiSU-Ultra-universal.apk
           ls -la manager/
           # 校验是否真的下载到 (404 页面会是一个小文件)
           SIZE=$(stat -c %s manager/ReSukiSU-Ultra-universal.apk)
