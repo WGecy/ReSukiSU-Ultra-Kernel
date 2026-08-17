@@ -1,10 +1,14 @@
 # ========================================
 # ReSukiSU-Ultra 内核构建核心工作流
-# 完全参照 GKI_KernelSU_SUSFS 构建流程:
+# 完全参照 GKI_KernelSU_SUSFS: bash 显式步骤, 不依赖 build.py
 #   1. 环境准备
-#   2. repo init + sync (kernel manifest, 含 kleaf tools/bazel)
-#   3. 功能补丁 (patches.py)
-#   4. build.py (SUSFS/KSU 注入 + defconfig + bazel + AK3)
+#   2. repo init + sync (kernel manifest)
+#   3. KernelSU (ReSukiSU-Ultra) 集成
+#   4. SUSFS (gitlab 上游)
+#   5. 功能补丁 (patches.py 模块)
+#   6. defconfig + fragment
+#   7. bazel 构建
+#   8. AK3 打包
 # ========================================
 name: 内核构建流程
 
@@ -74,8 +78,6 @@ jobs:
           echo "补丁级别  : ${{ inputs.os_patch_level }}"
           echo "KSU 分支  : ReSukiSU-Ultra (${{ inputs.ksu_branch }})"
           echo "SUSFS     : ${{ inputs.enable_susfs }}"
-          echo "ZRAM 增强 : ${{ inputs.use_zram }}"
-          echo "CVE 修复  : ${{ inputs.cve_2026_43499_patch }}"
           echo "========================================"
 
       - name: 清理磁盘空间
@@ -87,7 +89,7 @@ jobs:
           remove_tool_cache: true
           remove_swap: true
           remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* dotnet-sdk-*"
-          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/microsoft /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
 
       - name: 检出代码仓库
         uses: actions/checkout@v7
@@ -99,37 +101,13 @@ jobs:
             build-essential libssl-dev bison flex libelf-dev dwarves \
             openssl zip unzip bc kmod cpio jq openjdk-17-jdk-headless ccache
 
-      - name: 配置构建参数
-        run: |
-          python3 - << 'EOF'
-          import yaml
-          with open('config.yaml') as f:
-              cfg = yaml.safe_load(f)
-          cfg['build']['android_version'] = '${{ inputs.android_version }}'
-          cfg['build']['kernel_version'] = '${{ inputs.kernel_version }}'
-          cfg['build']['kernel_base'] = '${{ inputs.kernel_version }}.${{ inputs.sub_level }}'
-          cfg['build']['os_patch_level'] = '${{ inputs.os_patch_level }}'
-          cfg['build']['lts_merge'] = False
-          if '${{ inputs.build_time }}' != '' and '${{ inputs.build_time }}' != 'N':
-              cfg['build']['build_time'] = '${{ inputs.build_time }}'
-          cfg['susfs']['enabled'] = ${{ inputs.enable_susfs && 'True' || 'False' }}
-          cfg['features']['bbg'] = ${{ inputs.use_bbg && 'True' || 'False' }}
-          cfg['features']['zram_lz4kd'] = ${{ inputs.use_zram && 'True' || 'False' }}
-          cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch && 'True' || 'False' }}
-          cfg['features']['lts_fixes'] = False
-          with open('config.yaml', 'w') as f:
-              yaml.dump(cfg, f, allow_unicode=True)
-          print('config.yaml 已更新')
-          EOF
-
-      # ==================== 拉取内核源码 (参考 GKI_KernelSU_SUSFS) ====================
+      # ==================== 拉取内核源码 (repo manifest, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 初始化并同步内核源码
         run: |
           set -e
           mkdir -p build/repo
           cd build/repo
 
-          # repo 工具 (gerrit v2.16, 支持 --repo-rev)
           curl -s "https://gerrit.googlesource.com/git-repo/+/refs/tags/v2.16/repo?format=TEXT" | base64 -d > repo
           chmod +x repo
 
@@ -146,7 +124,6 @@ jobs:
             -u https://android.googlesource.com/kernel/manifest \
             -b ${MANIFEST_BRANCH} --repo-rev=v2.16
 
-          # deprecated 分支处理 (6.6.77: common revision 加 deprecated/ 前缀)
           if [ "${{ inputs.sub_level }}" == "77" ]; then
             sed -i 's/revision="android15-6.6-2025-03"/revision="deprecated\/android15-6.6-2025-03"/' .repo/manifests/default.xml
             echo "manifest: common -> deprecated/android15-6.6-2025-03"
@@ -154,15 +131,125 @@ jobs:
 
           echo "repo sync..."
           ./repo sync -c -j$(nproc --all) --no-tags --fail-fast
-
-          # 确认 common remote 为 aosp (build.py 依赖)
           git -C common remote -v | head -2
           test -f common/Makefile && echo "common/Makefile OK"
 
-      # ==================== 构建 (build.py: 补丁/KSU/SUSFS/defconfig/bazel/AK3) ====================
-      - name: 运行 build.py
+      # ==================== 添加 KernelSU (ReSukiSU-Ultra) ====================
+      - name: 添加 KernelSU (ReSukiSU-Ultra)
         run: |
-          python3 build.py
+          set -e
+          cd build/repo
+          # 克隆 ReSukiSU-Ultra 分支
+          git clone --depth 1 https://github.com/pengzenzen-creator/ReSukiSU-Ultra KernelSU
+          cd KernelSU
+          git checkout ${{ inputs.ksu_branch }}
+          echo "KSU commit: $(git rev-parse --short HEAD)"
+          cd ..
+
+          # 集成到内核树 (setup.sh 逻辑)
+          cd common/drivers
+          ln -sf "$(realpath --relative-to=. ../../KernelSU/kernel)" kernelsu
+          grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
+          grep -q "drivers/kernelsu/Kconfig" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
+          echo "KernelSU 集成完成"
+
+      # ==================== 应用 SUSFS (gitlab 上游) ====================
+      - name: 应用 SUSFS
+        if: ${{ inputs.enable_susfs }}
+        run: |
+          set -e
+          cd build/repo
+          # gitlab simonpunk 上游
+          git clone --depth 1 -b gki-${{ inputs.android_version }}-${{ inputs.kernel_version }} \
+            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          echo "SUSFS commit: $(git -C susfs4ksu log -1 --format='%H')"
+
+          # 应用补丁 (参考 build.py step05e)
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch ./common/
+          cp -r susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cd common
+          patch -p1 -F 3 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+          echo "SUSFS 补丁应用完成"
+
+      # ==================== 应用功能补丁 (patches.py 模块) ====================
+      - name: 应用功能补丁
+        run: |
+          python3 - << 'EOF'
+          import sys, yaml
+          sys.path.insert(0, '.')
+          from patches import apply_all
+          cfg = yaml.safe_load(open('config.yaml'))
+          # 依据输入覆盖 features
+          cfg['features']['bbg'] = ${{ inputs.use_bbg && 'True' || 'False' }}
+          cfg['features']['zram_lz4kd'] = ${{ inputs.use_zram && 'True' || 'False' }}
+          cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch && 'True' || 'False' }}
+          cfg['features']['lts_fixes'] = False
+          cfg['build']['lts_merge'] = False
+          apply_all(cfg, 'build/repo', sublevel='${{ inputs.sub_level }}', kernel_base='${{ inputs.kernel_version }}.${{ inputs.sub_level }}')
+          print('功能补丁应用完成')
+          EOF
+
+      # ==================== CVE-2026-43499 修复链 ====================
+      - name: 应用 CVE 修复
+        if: ${{ inputs.cve_2026_43499_patch }}
+        run: |
+          ACTUAL_SUB=$(grep '^SUBLEVEL = ' build/repo/common/Makefile | awk '{print $3}')
+          bash third_party/security_patch/apply_cve_2026_43499.sh \
+            ${{ inputs.kernel_version }} "$ACTUAL_SUB" third_party/security_patch
+          echo "CVE 修复完成 (SUBLEVEL=$ACTUAL_SUB)"
+
+      # ==================== defconfig + fragment ====================
+      - name: 生成 fragment
+        run: |
+          set -e
+          COMMON=build/repo/common
+          FRAG=$COMMON/arch/arm64/configs/tesla.fragment
+          mkdir -p $COMMON/arch/arm64/configs
+          # 固定项 (KSU/ADIOS/ipset/netisolate/fusebpf 等)
+          cat > $FRAG << 'FRAG_EOF'
+CONFIG_KSU=y
+CONFIG_KSU_NETISOLATE=y
+CONFIG_KSU_FUSEBPF_FIX=y
+CONFIG_IP_SET=y
+CONFIG_IP_SET_BITMAP_IP=y
+CONFIG_IP_SET_HASH_IP=y
+CONFIG_IP_SET_HASH_IPPORT=y
+CONFIG_IP_SET_HASH_IPPORTIP=y
+CONFIG_IP_SET_HASH_IPPORTNET=y
+CONFIG_IP_SET_HASH_NET=y
+CONFIG_IP_SET_HASH_NETPORT=y
+CONFIG_NETFILTER_XT_SET=y
+CONFIG_MQ_IOSCHED_ADIOS=y
+CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y
+FRAG_EOF
+          echo "fragment 生成: $(wc -l < $FRAG) 项"
+
+      # ==================== 编译内核 (kleaf bazel) ====================
+      - name: 编译内核
+        run: |
+          set -e
+          cd build/repo
+          # KMI 严格模式关闭 (参考 build.py step09)
+          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
+          sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
+          tools/bazel build --config=fast --lto=thin \
+            --defconfig_fragment=//common:arch/arm64/configs/tesla.fragment \
+            //common:kernel_aarch64_dist
+          test -f bazel-bin/common/kernel_aarch64/Image && echo "Image OK"
+
+      # ==================== 打包 AK3 ====================
+      - name: 打包 AnyKernel3
+        run: |
+          set -e
+          mkdir -p out/ak3
+          cp -r third_party/AnyKernel3/* out/ak3/
+          cp build/repo/bazel-bin/common/kernel_aarch64/Image out/ak3/
+          cd out/ak3
+          zip -q -r ../android15-6.6.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip .
+          ls -la ../*.zip
 
       - name: 上传内核产物
         uses: actions/upload-artifact@v7
