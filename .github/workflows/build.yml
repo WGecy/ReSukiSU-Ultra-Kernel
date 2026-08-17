@@ -126,10 +126,10 @@ jobs:
           cfg['build']['lts_merge'] = False
           if '${{ inputs.build_time }}' != '' and '${{ inputs.build_time }}' != 'N':
               cfg['build']['build_time'] = '${{ inputs.build_time }}'
-          cfg['susfs']['enabled'] = ${{ inputs.enable_susfs }}
-          cfg['features']['bbg'] = ${{ inputs.use_bbg }}
-          cfg['features']['zram_lz4kd'] = ${{ inputs.use_zram }}
-          cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch }}
+          cfg['susfs']['enabled'] = ${{ inputs.enable_susfs && 'True' || 'False' }}
+          cfg['features']['bbg'] = ${{ inputs.use_bbg && 'True' || 'False' }}
+          cfg['features']['zram_lz4kd'] = ${{ inputs.use_zram && 'True' || 'False' }}
+          cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch && 'True' || 'False' }}
           cfg['features']['lts_fixes'] = False
           with open('config.yaml', 'w') as f:
               yaml.dump(cfg, f, allow_unicode=True)
