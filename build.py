@@ -196,9 +196,7 @@ class Builder:
         kr = self.kernel_root
         kr.mkdir(parents=True, exist_ok=True)
         common = kr / "common"
-        if not (common / "Makefile").exists():
-            raise BuildError(f"源码缺失: {common}/Makefile")
-        # ===== 基线切换: 6.6.77 (2025-03) / 6.6.118 (2026-01) =====
+        # ===== 基线: 6.6.77 (2025-03) / 6.6.118 (2026-01) =====
         base = self.env.get("kernel_base", "6.6.77")
         if base == "6.6.118":
             branch = "android15-6.6-2026-01"
@@ -206,6 +204,15 @@ class Builder:
         else:
             branch = "deprecated/android15-6.6-2025-03"
             self.env["os_patch_level"] = "2025-03"
+        if not (common / "Makefile").exists():
+            # 自动拉取内核源码 (参考 GKI_KernelSU_SUSFS: googlesource 官方)
+            Log.info(f"拉取内核源码: {branch} (googlesource)...")
+            kr.mkdir(parents=True, exist_ok=True)
+            run(f"git clone -b {branch} "
+                f"https://android.googlesource.com/kernel/common {common}",
+                timeout=7200)
+            run(f"git -C {common} remote rename origin aosp", check=False)
+            Log.ok(f"源码就绪: {branch}")
         Log.info(f"基线: {base} → {branch}")
         cur = run(f"git -C {common} branch --show-current", check=False).stdout.strip()
         if cur != branch:
@@ -598,6 +605,20 @@ class Builder:
         common = self.kernel_root / "common"
         susfs = ROOT / "third_party" / "susfs4ksu"
         av, kv = self.env.get("android_version"), self.env.get("kernel_version")
+        # SUSFS 自动跟随上游 (参考 GKI_KernelSU_SUSFS: gitlab simonpunk 最新)
+        susfs_branch = f"gki-{av}-{kv}"
+        if (susfs / ".git").exists():
+            run(f"git -C {susfs} fetch origin {susfs_branch}", check=False)
+            run(f"git -C {susfs} checkout -q -B {susfs_branch} FETCH_HEAD", check=False)
+            Log.ok(f"SUSFS 已更新至上游最新 ({susfs_branch})")
+        else:
+            # 仓库提交的副本 (非 git) → 移除后克隆上游最新
+            import shutil
+            if susfs.exists():
+                shutil.rmtree(susfs)
+            run(f"git clone https://gitlab.com/simonpunk/susfs4ksu.git "
+                f"-b {susfs_branch} {susfs}", timeout=900)
+            Log.ok(f"SUSFS 已克隆上游最新 ({susfs_branch})")
         patch = susfs / "kernel_patches" / f"50_add_susfs_in_gki-{av}-{kv}.patch"
         if not patch.exists():
             raise BuildError(f"SUSFS 补丁缺失: {patch}")
@@ -962,30 +983,17 @@ class Builder:
             sl.write_text(sl.read_text().replace("-dirty", ""))
         gh = subprocess.run(["git", "rev-parse", "--verify", "HEAD", "--short=13"],
                             cwd=common, capture_output=True, text=True)
-        # 版本串策略 (2026-08-16):
-        #   LTS 合并后 (6.6.142 源码) 版本号固定为官方 6.6.118 完整串:
-        #   1) system_dlkm 模块目录按 vermagic 匹配 → 官方模块 (wifi/蓝牙/声音) 全部加载
-        #   2) 内核版本伪装 (检测 app 看到官方版本, 配合 SUSFS)
-        #   注: SUBLEVEL 保持 142 (源码), 但 UTS_RELEASE 显示 6.6.118
-        if self.env.get("kernel_base") == "6.6.118":
-            suffix = "-android15-8-ge56cf6b09cca-ab15511674"
-        else:
-            suffix = f"-android15-8-g{gh.stdout.strip()[:13]}-ab{10000000 + int(time.time()) % 90000000}"
+        # 版本串策略: 保持默认 (不伪装, 2026-08-17)
+        # 内核显示真实版本 (KERNELVERSION + 默认 scm 版本), 不做官方串固定
         if sl.exists():
             import re
             txt = sl.read_text()
             pattern = r'(.*)echo "\$\{KERNELVERSION\}\$\{file_localversion\}\$\{config_localversion\}\$\{LOCALVERSION\}\$\{scm_version\}"'
-            if self.env.get("kernel_base") == "6.6.118":
-                # 固定官方版本 (模块兼容 + 伪装): 完全替换, 不含 KERNELVERSION
-                txt = re.sub(pattern,
-                             f'\\1echo "6.6.118{suffix}${{config_localversion}}"',
-                             txt, flags=re.S)
-            else:
-                txt = re.sub(pattern,
-                             f'\\1echo "${{KERNELVERSION}}{suffix}${{config_localversion}}"',
-                             txt, flags=re.S)
+            txt = re.sub(pattern,
+                         f'\\1echo "${{KERNELVERSION}}${{config_localversion}}"',
+                         txt, flags=re.S)
             sl.write_text(txt)
-            Log.ok(f"版本格式: 6.6.118{suffix}-4k (官方兼容, system_dlkm 匹配)")
+            Log.ok("版本格式: 默认 (不伪装)")
 
     # ================= 8. 时间戳 =================
     def step08(self):
