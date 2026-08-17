@@ -205,14 +205,32 @@ class Builder:
             branch = "deprecated/android15-6.6-2025-03"
             self.env["os_patch_level"] = "2025-03"
         if not (common / "Makefile").exists():
-            # 自动拉取内核源码 (参考 GKI_KernelSU_SUSFS: googlesource 官方)
-            Log.info(f"拉取内核源码: {branch} (googlesource)...")
+            # 自动拉取内核源码 (参考 GKI_KernelSU_SUSFS: repo manifest + kleaf tools)
+            # repo sync 会拉取 common + tools/bazel + kernel/configs 等 (kleaf 构建必需)
+            Log.info(f"repo init/sync 拉取源码: {branch} (manifest)")
             kr.mkdir(parents=True, exist_ok=True)
-            run(f"git clone -b {branch} "
-                f"https://android.googlesource.com/kernel/common {common}",
-                timeout=7200)
-            run(f"git -C {common} remote rename origin aosp", check=False)
-            Log.ok(f"源码就绪: {branch}")
+            m_branch = ("common-android15-6.6-2026-01"
+                        if base == "6.6.118"
+                        else "common-android15-6.6-2025-03")
+            run(f"{self.REPO} init --depth=1 "
+                f"-u https://android.googlesource.com/kernel/manifest "
+                f"-b {m_branch} --repo-rev=v2.16",
+                cwd=kr, timeout=600)
+            if base != "6.6.118":
+                # deprecated 分支: manifest 里 common revision 改 deprecated/ 前缀
+                mf = kr / ".repo" / "manifests" / "default.xml"
+                if mf.exists():
+                    txt = mf.read_text()
+                    txt = txt.replace('revision="android15-6.6-2025-03"',
+                                      'revision="deprecated/android15-6.6-2025-03"')
+                    mf.write_text(txt)
+                    Log.info("manifest: common 已指向 deprecated/android15-6.6-2025-03")
+            run(f"{self.REPO} sync -c -j$(nproc --all) --no-tags --fail-fast",
+                cwd=kr, timeout=7200)
+            if not (common / "Makefile").exists():
+                raise BuildError(f"repo sync 后 common/Makefile 仍缺失: {common}")
+            # repo sync 的 common remote 名为 aosp (manifest 定义), 与 build.py 兼容
+            Log.ok(f"源码就绪: {branch} (repo sync)")
         Log.info(f"基线: {base} → {branch}")
         cur = run(f"git -C {common} branch --show-current", check=False).stdout.strip()
         if cur != branch:
