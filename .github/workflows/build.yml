@@ -1,7 +1,10 @@
 # ========================================
 # ReSukiSU-Ultra 内核构建核心工作流
-# 复用 Tesla_Kernel build.py 全流程 (环境/KSU/SUSFS/补丁/bazel/AK3)
-# 通过 workflow_call 被入口工作流调用
+# 完全参照 GKI_KernelSU_SUSFS 构建流程:
+#   1. 环境准备
+#   2. repo init + sync (kernel manifest, 含 kleaf tools/bazel)
+#   3. 功能补丁 (patches.py)
+#   4. build.py (SUSFS/KSU 注入 + defconfig + bazel + AK3)
 # ========================================
 name: 内核构建流程
 
@@ -15,7 +18,6 @@ env:
 on:
   workflow_call:
     inputs:
-      # ==================== 基础配置 ====================
       android_version:
         required: true
         type: string
@@ -28,15 +30,10 @@ on:
       os_patch_level:
         required: true
         type: string
-
-      # ==================== KernelSU ====================
-      # 仅 ReSukiSU-Ultra 分支
       ksu_branch:
         required: false
         type: string
         default: "main"
-
-      # ==================== 可选 ====================
       version:
         required: false
         type: string
@@ -44,8 +41,6 @@ on:
         required: false
         type: string
         default: "N"
-
-      # ==================== 功能开关 ====================
       enable_susfs:
         required: false
         type: boolean
@@ -70,7 +65,6 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      # ==================== 构建摘要 ====================
       - name: 构建信息摘要
         run: |
           echo "========================================"
@@ -84,7 +78,6 @@ jobs:
           echo "CVE 修复  : ${{ inputs.cve_2026_43499_patch }}"
           echo "========================================"
 
-      # ==================== 清理磁盘 ====================
       - name: 清理磁盘空间
         uses: endersonmenezes/free-disk-space@v3
         with:
@@ -96,23 +89,16 @@ jobs:
           remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* dotnet-sdk-*"
           remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
 
-      # ==================== 检出 ====================
       - name: 检出代码仓库
         uses: actions/checkout@v7
 
-      # ==================== 安装依赖 ====================
       - name: 安装编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y python3 python3-venv python3-yaml git curl \
             build-essential libssl-dev bison flex libelf-dev dwarves \
-            openssl zip unzip bc kmod cpio \
-            openjdk-17-jdk-headless 2>/dev/null || \
-          sudo apt-get install -y python3 python3-venv python3-yaml git curl \
-            build-essential libssl-dev bison flex libelf-dev dwarves \
-            openssl zip unzip bc kmod cpio openjdk-17-jdk-headless
+            openssl zip unzip bc kmod cpio jq openjdk-17-jdk-headless ccache
 
-      # ==================== 配置构建 (按输入覆盖 config.yaml) ====================
       - name: 配置构建参数
         run: |
           python3 - << 'EOF'
@@ -136,12 +122,48 @@ jobs:
           print('config.yaml 已更新')
           EOF
 
-      # ==================== 构建内核 ====================
+      # ==================== 拉取内核源码 (参考 GKI_KernelSU_SUSFS) ====================
+      - name: 初始化并同步内核源码
+        run: |
+          set -e
+          mkdir -p build/repo
+          cd build/repo
+
+          # repo 工具 (gerrit v2.16, 支持 --repo-rev)
+          curl -s "https://gerrit.googlesource.com/git-repo/+/refs/tags/v2.16/repo?format=TEXT" | base64 -d > repo
+          chmod +x repo
+
+          if [ "${{ inputs.sub_level }}" == "77" ]; then
+            FORMATTED_BRANCH="android15-6.6-2025-03"
+            MANIFEST_BRANCH="common-android15-6.6-2025-03"
+          else
+            FORMATTED_BRANCH="android15-6.6-2026-01"
+            MANIFEST_BRANCH="common-android15-6.6-2026-01"
+          fi
+
+          echo "repo init: ${MANIFEST_BRANCH}"
+          ./repo init --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b ${MANIFEST_BRANCH} --repo-rev=v2.16
+
+          # deprecated 分支处理 (6.6.77: common revision 加 deprecated/ 前缀)
+          if [ "${{ inputs.sub_level }}" == "77" ]; then
+            sed -i 's/revision="android15-6.6-2025-03"/revision="deprecated\/android15-6.6-2025-03"/' .repo/manifests/default.xml
+            echo "manifest: common -> deprecated/android15-6.6-2025-03"
+          fi
+
+          echo "repo sync..."
+          ./repo sync -c -j$(nproc --all) --no-tags --fail-fast
+
+          # 确认 common remote 为 aosp (build.py 依赖)
+          git -C common remote -v | head -2
+          test -f common/Makefile && echo "common/Makefile OK"
+
+      # ==================== 构建 (build.py: 补丁/KSU/SUSFS/defconfig/bazel/AK3) ====================
       - name: 运行 build.py
         run: |
           python3 build.py
 
-      # ==================== 上传产物 ====================
       - name: 上传内核产物
         uses: actions/upload-artifact@v7
         with:
@@ -149,7 +171,6 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
-      # ==================== 发布 Release (打 tag 时) ====================
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
