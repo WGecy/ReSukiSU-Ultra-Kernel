@@ -378,21 +378,27 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
-      # ==================== 自动发布 Release (gh CLI, 无第三方依赖) ====================
-      - name: 删除旧 Release
-        if: github.event_name != 'pull_request'
-        continue-on-error: true
-        run: |
-          gh release delete kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }} \
-            --repo ${{ github.repository }} --yes --cleanup-tag || true
-
+      # ==================== 自动发布 Release (gh CLI, 带重试) ====================
       - name: 发布 Release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }} \
-            out/*.zip \
-            --repo ${{ github.repository }} \
-            --title "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}" \
-            --notes "自动构建内核产物 (ReSukiSU-Ultra 分支)\n版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
+          set -e
+          TAG="kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
+          # 删除旧 Release/tag (容错)
+          gh release delete "$TAG" --repo ${{ github.repository }} --yes --cleanup-tag 2>/dev/null || echo "无旧 release 或删除失败, 继续"
+          sleep 3
+          # 创建 (带重试, 防 API 429/并发)
+          for i in 1 2 3 4; do
+            if gh release create "$TAG" out/*.zip \
+              --repo ${{ github.repository }} \
+              --title "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}" \
+              --notes "自动构建内核产物 (ReSukiSU-Ultra 分支)\n版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"; then
+              echo "Release 发布成功: $TAG"
+              break
+            fi
+            echo "发布失败(第 $i 次), 等待重试..."
+            sleep 8
+          done
+          gh release view "$TAG" --repo ${{ github.repository }} >/dev/null || exit 1
