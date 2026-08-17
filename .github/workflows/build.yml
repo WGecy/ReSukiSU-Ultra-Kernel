@@ -322,22 +322,21 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
-      # ==================== 自动发布 Release ====================
+      # ==================== 自动发布 Release (gh CLI, 无第三方依赖) ====================
       - name: 删除旧 Release
         if: github.event_name != 'pull_request'
         continue-on-error: true
         run: |
           gh release delete kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }} \
-            --repo ${{ github.repository }} --yes --cleanup-tag
+            --repo ${{ github.repository }} --yes --cleanup-tag || true
 
       - name: 发布 Release
         if: github.event_name != 'pull_request'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
-          name: "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
-          body: |
-            自动构建内核产物 (ReSukiSU-Ultra 分支)
-            - 版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}
-          files: out/*.zip
-          fail_on_unmatched_files: false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }} \
+            out/*.zip \
+            --repo ${{ github.repository }} \
+            --title "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}" \
+            --notes "自动构建内核产物 (ReSukiSU-Ultra 分支)\n版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
