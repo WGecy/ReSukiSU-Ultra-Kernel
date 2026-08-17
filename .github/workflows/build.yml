@@ -162,6 +162,17 @@ jobs:
           grep -q "drivers/kernelsu/Kconfig" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
           echo "KernelSU 集成完成"
 
+          # ===== seccomp PF_EXITING 兼容修复 (6.6.118+ 防死机, 参考 build.py step05d) =====
+          if [ "${{ inputs.sub_level }}" == "118" ]; then
+            APP_PROFILE="../../KernelSU/kernel/policy/app_profile.c"
+            if [ -f "$APP_PROFILE" ] && grep -q "KERNEL_VERSION(6, 11, 0)" "$APP_PROFILE"; then
+              sed -i 's/KERNEL_VERSION(6, 11, 0)/KERNEL_VERSION(6, 6, 118)/' "$APP_PROFILE"
+              echo "PF_EXITING 兼容修复已注入 (6.6.118+)"
+            else
+              echo "PF_EXITING 无需修复或已修复"
+            fi
+          fi
+
       # ==================== 应用 SUSFS (gitlab 上游) ====================
       - name: 应用 SUSFS
         if: ${{ inputs.enable_susfs }}
@@ -403,6 +414,24 @@ jobs:
           echo "使用构建时间: $DATESTR"
           echo "KBUILD_BUILD_TIMESTAMP=$DATESTR" >> $GITHUB_ENV
           echo "KBUILD_BUILD_VERSION=1" >> $GITHUB_ENV
+
+      - name: 内核基础修复 (zram 内建 + nr_requests)
+        run: |
+          set -e
+          cd build/repo
+          # ZRAM 内建: 移除模块列表 (防与内建冲突)
+          if [ -f common/modules.bzl ]; then
+            sed -i 's/"drivers\/block\/zram\/zram.ko",\n//g' common/modules.bzl
+            sed -i 's/"mm\/zsmalloc.ko",\n//g' common/modules.bzl
+            sed -i 's/"drivers\/block\/zram\/zram.ko",//g' common/modules.bzl
+            sed -i 's/"mm\/zsmalloc.ko",//g' common/modules.bzl
+            echo "zram.ko/zsmalloc.ko 已从模块列表移除"
+          fi
+          # nr_requests 默认 256 (BLKDEV_DEFAULT_RQ 128→256)
+          if grep -q "#define BLKDEV_DEFAULT_RQ" common/include/linux/blk-mq.h; then
+            sed -i 's/#define BLKDEV_DEFAULT_RQ\t128/#define BLKDEV_DEFAULT_RQ\t256/' common/include/linux/blk-mq.h
+            echo "BLKDEV_DEFAULT_RQ → 256"
+          fi
 
       - name: 编译内核
         run: |
