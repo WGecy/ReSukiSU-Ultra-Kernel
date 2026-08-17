@@ -256,17 +256,35 @@ jobs:
             grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
           fi
 
+          # SUSFS 配置 (参考 GKI_KernelSU_SUSFS)
+          if [ "${{ inputs.enable_susfs }}" == "true" ]; then
+            cat >> $DEFCONFIG << 'SUSFS_EOF'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          SUSFS_EOF
+            echo "SUSFS CONFIG 已追加"
+          fi
+
           # 生成 fragment (diff defconfig vs .orig)
           diff -u $DEFCONFIG.orig $DEFCONFIG | grep '^+CONFIG_' | cut -c2- > $FRAG
           echo "fragment 生成: $(wc -l < $FRAG) 项"
           head -30 $FRAG
 
-      # ==================== 编译内核 (kleaf bazel) ====================
+      # ==================== 编译内核 (kleaf bazel, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 编译内核
         run: |
           set -e
           cd build/repo
-          # KMI 严格模式关闭 (参考 build.py step09)
+          # 关闭 savedefconfig 校验 (check_defconfig) 与 KMI 严格模式
+          sed -i 's/check_defconfig//' common/build.config.gki
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
           sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
           tools/bazel build --config=fast --lto=thin \
