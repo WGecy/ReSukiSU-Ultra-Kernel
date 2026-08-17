@@ -300,11 +300,13 @@ jobs:
           for c in CONFIG_IP_SET CONFIG_IP_SET_BITMAP_IP CONFIG_IP_SET_BITMAP_IPMAC CONFIG_IP_SET_BITMAP_PORT CONFIG_IP_SET_HASH_IP CONFIG_IP_SET_HASH_IPMARK CONFIG_IP_SET_HASH_IPPORT CONFIG_IP_SET_HASH_IPPORTIP CONFIG_IP_SET_HASH_IPPORTNET CONFIG_IP_SET_HASH_MAC CONFIG_IP_SET_HASH_NET CONFIG_IP_SET_HASH_NETIFACE CONFIG_IP_SET_HASH_NETNET CONFIG_IP_SET_HASH_NETPORT CONFIG_IP_SET_HASH_NETPORTNET CONFIG_IP_SET_LIST_SET CONFIG_NETFILTER_XT_SET; do
             enable_config_if_defined $c
           done
-          # ADIOS IO 调度器 (choice 项原位处理)
+          # ADIOS IO 调度器 (默认, 原位替换 gki_defconfig 的 choice)
           enable_config_if_defined CONFIG_MQ_IOSCHED_ADIOS
           if config_defined CONFIG_MQ_IOSCHED_DEFAULT_ADIOS; then
+            # 替换 gki_defconfig 现有的默认调度器 choice (如 CPQ/DEADLINE) → ADIOS
             sed -i 's/^CONFIG_MQ_IOSCHED_DEFAULT_[A-Z_]*=y$/CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y/' $DEFCONFIG
             grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
+            echo "ADIOS 已设为默认调度器"
           fi
 
           # MGLRU (显式开启, 强制 0x3)
@@ -330,8 +332,7 @@ jobs:
 
           # 生成 fragment (diff defconfig vs .orig, 参考 GKI_KernelSU_SUSFS)
           diff "$DEFCONFIG.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > $FRAG || true
-          # 还原 defconfig (fragment 作为增量, 避免 trim 检查)
-          cp $DEFCONFIG.orig $DEFCONFIG
+          # 不还原 defconfig (保留 ADIOS 默认等 choice 修改; check_defconfig 已关闭)
           echo "fragment 生成: $(wc -l < $FRAG) 项"
           head -40 $FRAG
 
@@ -348,8 +349,10 @@ jobs:
           # 移除 MODULES_ORDER (避免 vendor 模块目录不匹配)
           sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' build.config.gki.aarch64 2>/dev/null || true
 
-          # setlocalversion 去掉 -dirty
+          # setlocalversion 去掉 -dirty / maybe-dirty (kleaf 可复现构建)
           sed -i 's/-dirty//' scripts/setlocalversion 2>/dev/null || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+          sed -i 's/-maybe-dirty//g' scripts/setlocalversion 2>/dev/null || true
 
           # ===== WiFi/蓝牙 厂商符号 (三星 min_kdp + 小米) =====
           ensure_line_once() {
