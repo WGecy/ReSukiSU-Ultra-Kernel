@@ -415,19 +415,21 @@ jobs:
         run: |
           set -e
           TAG="kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
-          # 删除旧 Release/tag (容错)
-          gh release delete "$TAG" --repo ${{ github.repository }} --yes --cleanup-tag 2>/dev/null || echo "无旧 release 或删除失败, 继续"
-          sleep 3
-          # 创建 (带重试, 防 API 429/并发)
-          for i in 1 2 3 4; do
+          REPO="${{ github.repository }}"
+          # 彻底删除旧 release + tag
+          gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
+          gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" 2>/dev/null || true
+          sleep 5
+          # 创建 (带重试, 防 API 429/500)
+          for i in 1 2 3 4 5; do
             if gh release create "$TAG" out/*.zip \
-              --repo ${{ github.repository }} \
+              --repo "$REPO" \
               --title "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}" \
               --notes "自动构建内核产物 (ReSukiSU-Ultra 分支)\n版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"; then
               echo "Release 发布成功: $TAG"
-              break
+              exit 0
             fi
             echo "发布失败(第 $i 次), 等待重试..."
-            sleep 8
+            sleep 10
           done
-          gh release view "$TAG" --repo ${{ github.repository }} >/dev/null || exit 1
+          exit 1
