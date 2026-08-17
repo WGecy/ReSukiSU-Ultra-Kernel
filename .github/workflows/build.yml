@@ -289,6 +289,59 @@ jobs:
           echo "fragment 生成: $(wc -l < $FRAG) 项"
           head -40 $FRAG
 
+      # ==================== KMI 兼容修复 (参照 GKI_KernelSU_SUSFS, wifi/网络/声音/震动模块加载) ====================
+      - name: 修复 KMI 兼容性
+        working-directory: build/repo/common
+        run: |
+          set -e
+          # 移除 protected exports 限制 (KSU/SUSFS 导出符号需可见)
+          sed -i '/protected_exports_list/d' BUILD.bazel 2>/dev/null || true
+          sed -i '/kmi_symbol_list_strict_mode/d' BUILD.bazel 2>/dev/null || true
+          rm -rf android/abi_gki_protected_exports_* 2>/dev/null || true
+
+          # 移除 MODULES_ORDER (避免 vendor 模块目录不匹配)
+          sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' build.config.gki.aarch64 2>/dev/null || true
+
+          # setlocalversion 去掉 -dirty
+          sed -i 's/-dirty//' scripts/setlocalversion 2>/dev/null || true
+
+          # ===== WiFi/蓝牙 厂商符号 (三星 min_kdp + 小米) =====
+          ensure_line_once() {
+            local file="$1"; local line="$2"
+            if [ ! -f "$file" ]; then echo "  ! 文件不存在: $file"; return 0; fi
+            if ! grep -qF "$line" "$file"; then echo "$line" >> "$file"; fi
+          }
+          GALAXY_SYMBOL_LIST="android/abi_gki_aarch64_galaxy"
+          XIAOMI_SYMBOL_LIST="android/abi_gki_aarch64_xiaomi"
+          KERNEL_PATCHES=$GITHUB_WORKSPACE/third_party/kernel_patches
+
+          # 三星: KDP 符号 (幂等)
+          if [ -f "$GALAXY_SYMBOL_LIST" ]; then
+            ensure_line_once "$GALAXY_SYMBOL_LIST" "kdp_set_cred_non_rcu"
+            ensure_line_once "$GALAXY_SYMBOL_LIST" "kdp_usecount_dec_and_test"
+            ensure_line_once "$GALAXY_SYMBOL_LIST" "kdp_usecount_inc"
+            echo "  三星 KDP 符号已追加"
+          fi
+
+          # 三星: min_kdp 驱动
+          MIN_KDP_SRC="$KERNEL_PATCHES/samsung/min_kdp/min_kdp.c"
+          MIN_KDP_PATCH="$KERNEL_PATCHES/samsung/min_kdp/add-min_kdp-symbols.patch"
+          if [ -f "$MIN_KDP_SRC" ]; then
+            cp "$MIN_KDP_SRC" drivers/min_kdp.c
+            ensure_line_once drivers/Makefile "obj-y += min_kdp.o"
+            echo "  三星 min_kdp 驱动已集成"
+            if [ -f "$MIN_KDP_PATCH" ]; then
+              patch -p1 --no-backup-if-mismatch < "$MIN_KDP_PATCH" 2>/dev/null || echo "  min_kdp 符号补丁跳过 (上下文不匹配)"
+            fi
+          fi
+
+          # 小米: device_find_any_child 符号
+          if [ -f "$XIAOMI_SYMBOL_LIST" ]; then
+            ensure_line_once "$XIAOMI_SYMBOL_LIST" "device_find_any_child"
+            echo "  小米符号已追加"
+          fi
+          echo "KMI 兼容修复完成"
+
       # ==================== 编译内核 (kleaf bazel, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 编译内核
         run: |
@@ -308,12 +361,14 @@ jobs:
       - name: 打包 AnyKernel3
         run: |
           set -e
-          mkdir -p out/ak3
-          cp -r third_party/AnyKernel3/* out/ak3/
-          cp build/repo/bazel-bin/common/kernel_aarch64/Image out/ak3/
-          cd out/ak3
-          zip -q -r ../android15-6.6.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip .
-          ls -la ../*.zip
+          ZIP_NAME="android15-6.6.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          rm -f out/$ZIP_NAME
+          # 直接打包 AnyKernel3 内容 + Image (参考 GKI_KernelSU_SUSFS: cd AnyKernel3 目录 zip)
+          cd third_party/AnyKernel3
+          cp ../../build/repo/bazel-bin/common/kernel_aarch64/Image ./Image
+          zip -q -r ../../out/$ZIP_NAME ./*
+          rm -f ./Image
+          ls -la ../../out/$ZIP_NAME
 
       - name: 上传内核产物
         uses: actions/upload-artifact@v7
