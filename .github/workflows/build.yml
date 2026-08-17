@@ -177,6 +177,7 @@ jobs:
         run: |
           python3 - << 'EOF'
           import sys, yaml
+          from pathlib import Path
           sys.path.insert(0, '.')
           from patches import apply_all
           cfg = yaml.safe_load(open('config.yaml'))
@@ -186,7 +187,7 @@ jobs:
           cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch && 'True' || 'False' }}
           cfg['features']['lts_fixes'] = False
           cfg['build']['lts_merge'] = False
-          apply_all(cfg, 'build/repo', sublevel='${{ inputs.sub_level }}', kernel_base='${{ inputs.kernel_version }}.${{ inputs.sub_level }}')
+          apply_all(cfg, Path('build/repo'), sublevel='${{ inputs.sub_level }}', kernel_base='${{ inputs.kernel_version }}.${{ inputs.sub_level }}')
           print('功能补丁应用完成')
           EOF
 
