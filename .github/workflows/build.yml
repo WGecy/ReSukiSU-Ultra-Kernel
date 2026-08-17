@@ -362,6 +362,7 @@ jobs:
         run: |
           set -e
           ZIP_NAME="android15-6.6.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          mkdir -p out
           rm -f out/$ZIP_NAME
           # 直接打包 AnyKernel3 内容 + Image (参考 GKI_KernelSU_SUSFS: cd AnyKernel3 目录 zip)
           cd third_party/AnyKernel3
