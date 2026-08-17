@@ -214,7 +214,7 @@ class Builder:
                         else "common-android15-6.6-2025-03")
             run(f"{self.REPO} init --depth=1 "
                 f"-u https://android.googlesource.com/kernel/manifest "
-                f"-b {m_branch} --repo-rev=v2.16",
+                f"-b {m_branch}",
                 cwd=kr, timeout=600)
             if base != "6.6.118":
                 # deprecated 分支: manifest 里 common revision 改 deprecated/ 前缀
