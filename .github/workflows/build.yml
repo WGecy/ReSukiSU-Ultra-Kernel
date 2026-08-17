@@ -229,7 +229,20 @@ jobs:
             echo "功能补丁应用完整 (无 .rej 冲突)"
           fi
 
-      # ==================== CVE-2026-43499 修复链 ====================
+      # ==================== MGLRU 强制全开 (FORCE3, 防 init.rc 关闭) ====================
+      - name: 强制 MGLRU (vmscan FORCE3)
+        run: |
+          set -e
+          VS=build/repo/common/mm/vmscan.c
+          # 1) enabled_store: 任何写入强制 caps=3 (CORE | MM_WALK) — perl 注入, 无 tab 问题
+          if ! grep -q "MGLRU FORCE3" "$VS"; then
+            perl -0777 -pi -e 's/(\telse if \(kstrtouint\(buf, 0, &caps\)\)\n\t\treturn -EINVAL;\n)/$1\n#ifdef CONFIG_LRU_GEN_ENABLED\n\t\/\* ReSukiSU-Ultra: MGLRU FORCE3 \*\/\n\tcaps = 3;\n#endif\n/' "$VS"
+            echo "vmscan.c: MGLRU FORCE3 (caps=3) 已注入"
+          else
+            echo "vmscan.c: MGLRU FORCE3 已存在"
+          fi
+          grep -c "MGLRU FORCE3" "$VS" || true
+
       - name: 应用 CVE 修复
         if: ${{ inputs.cve_2026_43499_patch }}
         working-directory: build/repo/common
@@ -293,6 +306,10 @@ jobs:
             sed -i 's/^CONFIG_MQ_IOSCHED_DEFAULT_[A-Z_]*=y$/CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y/' $DEFCONFIG
             grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
           fi
+
+          # MGLRU (显式开启, 强制 0x3)
+          enable_config_if_defined CONFIG_LRU_GEN
+          enable_config_if_defined CONFIG_LRU_GEN_ENABLED
 
           # SUSFS 配置 (参考 GKI_KernelSU_SUSFS)
           if [ "${{ inputs.enable_susfs }}" == "true" ]; then
@@ -372,6 +389,18 @@ jobs:
           echo "KMI 兼容修复完成"
 
       # ==================== 编译内核 (kleaf bazel, 参考 GKI_KernelSU_SUSFS) ====================
+      - name: 设置构建时间
+        run: |
+          INPUT_TIME="${{ inputs.build_time }}"
+          if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "N" && "$INPUT_TIME" != "n" ]]; then
+            DATESTR="$INPUT_TIME"
+          else
+            DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
+          fi
+          echo "使用构建时间: $DATESTR"
+          echo "KBUILD_BUILD_TIMESTAMP=$DATESTR" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_VERSION=1" >> $GITHUB_ENV
+
       - name: 编译内核
         run: |
           set -e
@@ -407,29 +436,3 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
-      # ==================== 自动发布 Release (gh CLI, 带重试) ====================
-      - name: 发布 Release
-        if: github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          TAG="kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"
-          REPO="${{ github.repository }}"
-          # 彻底删除旧 release + tag
-          gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
-          gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" 2>/dev/null || true
-          sleep 5
-          # 创建 (带重试, 防 API 429/500)
-          for i in 1 2 3 4 5; do
-            if gh release create "$TAG" out/*.zip \
-              --repo "$REPO" \
-              --title "ReSukiSU-Ultra-Kernel ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}" \
-              --notes "自动构建内核产物 (ReSukiSU-Ultra 分支)\n版本: ${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}"; then
-              echo "Release 发布成功: $TAG"
-              exit 0
-            fi
-            echo "发布失败(第 $i 次), 等待重试..."
-            sleep 10
-          done
-          exit 1

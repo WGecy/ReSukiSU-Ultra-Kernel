@@ -98,3 +98,52 @@ jobs:
   get-ksu-manager:
     uses: ./.github/workflows/get-manager.yml
     secrets: inherit
+
+  # ==================== 合并发布 (6.6.77 + 6.6.118 + 管理器 APK → 一个 Release) ====================
+  publish:
+    needs: [build-kernels-a15-6-6, get-ksu-manager]
+    if: always() && (needs.build-kernels-a15-6-6.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载内核产物
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 下载管理器 APK
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          name: manager-apk
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: 列出产物
+        run: ls -la dist/ || echo "dist 为空"
+
+      - name: 删除旧合并 Release
+        continue-on-error: true
+        run: |
+          gh release delete kernel-latest --repo ${{ github.repository }} --yes 2>/dev/null || true
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/kernel-latest" 2>/dev/null || true
+          sleep 5
+
+      - name: 发布合并 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for i in 1 2 3 4 5; do
+            if gh release create kernel-latest dist/* \
+              --repo ${{ github.repository }} \
+              --title "ReSukiSU-Ultra-Kernel (6.6.77 + 6.6.118 + 管理器)" \
+              --notes "自动构建 (ReSukiSU-Ultra 分支)\n- 6.6.77 (2025-03)\n- 6.6.118 (2026-01)\n- ReSukiSU-Ultra 管理器 APK"; then
+              echo "合并 Release 发布成功: kernel-latest"
+              exit 0
+            fi
+            echo "发布失败(第 $i 次), 重试..."; sleep 10
+          done
+          exit 1
