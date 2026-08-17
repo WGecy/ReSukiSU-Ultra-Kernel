@@ -22,14 +22,15 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p manager
-          # 获取最新 release 的 APK 下载地址 (公开仓库匿名可访问)
-          ASSETS=$(curl -s "https://api.github.com/repos/pengzenzen-creator/ReSukiSU-Ultra/releases/latest" | jq -r '.assets[].browser_download_url' | grep -i "\.apk$")
-          if [ -z "$ASSETS" ]; then
-            echo "::warning::ReSukiSU-Ultra 无 release 资产, 请先给 ReSukiSU-Ultra 打 tag (v*) 发布"
-            exit 0
-          fi
-          echo "$ASSETS" | xargs -I{} curl -sL {} -o manager/$(basename {})
+          # latest/download 直连 (固定资产名, 无需 API 不触发限流)
+          curl -sL "https://github.com/pengzenzen-creator/ReSukiSU-Ultra/releases/latest/download/ReSukiSU-Ultra-universal.apk" -o manager/ReSukiSU-Ultra-universal.apk
           ls -la manager/
+          # 校验是否真的下载到 (404 页面会是一个小文件)
+          SIZE=$(stat -c %s manager/ReSukiSU-Ultra-universal.apk)
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "::warning::管理器 APK 下载失败 (可能无 release), 跳过"
+            rm -f manager/ReSukiSU-Ultra-universal.apk
+          fi
 
       - name: 上传管理器 APK
         uses: actions/upload-artifact@v7
