@@ -266,7 +266,7 @@ jobs:
                       '\t/* Tesla: adios 为默认调度器, 防止 vendor 模块 (cpq 等) 切换走 */\n'
                       '\tif (q->elevator && new_e && strcmp(new_e->elevator_name, "adios") != 0 &&\n'
                       '\t    q->elevator->type && strcmp(q->elevator->type->elevator_name, "adios") == 0) {\n'
-                      '\t\tpr_info("tesla: 拒绝切换调度器 adios -> %s (保持 adios)\n",\n'
+                      '\t\tpr_info("tesla: 拒绝切换调度器 adios -> %s (保持 adios)\\n",\n'
                       '\t\t\tnew_e->elevator_name);\n'
                       '\t\treturn 0;\n'
                       '\t}\n'
