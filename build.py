@@ -893,7 +893,8 @@ class Builder:
                 Log.ok("mm/Makefile: tesla_vm_opt.o 已挂载")
         # ===== adios 默认调度器固化 (elevator.c) =====
         # 1) elevator_get_default: CONFIG_MQ_IOSCHED_DEFAULT_ADIOS → 默认 adios
-        # 2) elevator_switch: 拦截已禁用 (2026-08-18, 管理器 IO 调度器切换功能需要自由切换)
+        # 2) elevator_switch: 仅拦 cpq (OnePlus 厂商 init 开机默认写 cpq, 覆盖管理器固化值; 其余调度器自由切换)
+        #    cpq 为厂商私有调度器, 与 ADIOS/SSG 冲突, 拦掉不影响自由切换
         ev = common / "block" / "elevator.c"
         if ev.exists():
             txt = ev.read_text()
@@ -908,6 +909,27 @@ class Builder:
                 if old in txt:
                     txt = txt.replace(old, new, 1)
                     Log.ok("elevator.c: 默认调度器 → adios")
+            # switch 保护: 仅拦 cpq
+            if "tesla: 拒绝切换调度器" not in txt:
+                old2 = 'int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n{\n\tint ret;\n\n\tlockdep_assert_held(&q->sysfs_lock);\n'
+                new2 = ('int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n'
+                        '{\n'
+                        '\tint ret;\n'
+                        '\n'
+                        '\tlockdep_assert_held(&q->sysfs_lock);\n'
+                        '\n'
+                        '#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
+                        '\t/* Tesla: 仅拦 cpq (厂商 init 开机写入), 其余调度器自由切换 */\n'
+                        '\tif (q->elevator && new_e &&\n'
+                        '\t    strcmp(new_e->elevator_name, "cpq") == 0) {\n'
+                        '\t\tpr_info("tesla: 拒绝切换调度器 %s -> cpq\\n",\n'
+                        '\t\t\tq->elevator->type->elevator_name);\n'
+                        '\t\treturn 0;\n'
+                        '\t}\n'
+                        '#endif\n')
+                if old2 in txt:
+                    txt = txt.replace(old2, new2, 1)
+                    Log.ok("elevator.c: cpq 拦截已加 (厂商 init 防覆盖)")
             ev.write_text(txt)
         # ===== MGLRU 强制开启固化 =====
         # init.rc 会写 /sys/kernel/mm/lru_gen/enabled 0 (关闭), 这里拦截
