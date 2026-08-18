@@ -356,23 +356,17 @@ jobs:
           for c in CONFIG_IP_SET CONFIG_IP_SET_BITMAP_IP CONFIG_IP_SET_BITMAP_IPMAC CONFIG_IP_SET_BITMAP_PORT CONFIG_IP_SET_HASH_IP CONFIG_IP_SET_HASH_IPMARK CONFIG_IP_SET_HASH_IPPORT CONFIG_IP_SET_HASH_IPPORTIP CONFIG_IP_SET_HASH_IPPORTNET CONFIG_IP_SET_HASH_MAC CONFIG_IP_SET_HASH_NET CONFIG_IP_SET_HASH_NETIFACE CONFIG_IP_SET_HASH_NETNET CONFIG_IP_SET_HASH_NETPORT CONFIG_IP_SET_HASH_NETPORTNET CONFIG_IP_SET_LIST_SET CONFIG_NETFILTER_XT_SET; do
             enable_config_if_defined $c
           done
-          # ADIOS IO 调度器 (默认, 兼容 choice + CONFIG_DEFAULT_IOSCHED 字符串两种格式)
+          # ADIOS IO 调度器 (choice 默认 → ADIOS; 真正生效靠 elevator.c 拦截步骤)
           enable_config_if_defined CONFIG_MQ_IOSCHED_ADIOS
           if config_defined CONFIG_MQ_IOSCHED_DEFAULT_ADIOS; then
-            # 格式1: choice (CONFIG_MQ_IOSCHED_DEFAULT_*=y) → ADIOS
+            # choice: 替换 gki_defconfig 现有的默认调度器 (如 DEADLINE/CPQ) → ADIOS
+            # 注意: 不要碰 CONFIG_DEFAULT_IOSCHED (Kconfig 无 prompt 的隐式字符串, 显式设置会被校验拒绝)
             sed -i 's/^CONFIG_MQ_IOSCHED_DEFAULT_[A-Z0-9_]*=y$/CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y/' $DEFCONFIG
             grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
-            # 格式2: 字符串 (CONFIG_DEFAULT_IOSCHED="...") → "adios"
-            # 关键: DEFAULT_IOSCHED 是独立字符串 config, 不随 choice 自动写 defconfig → 必须显式追加
-            if grep -q '^CONFIG_DEFAULT_IOSCHED=' $DEFCONFIG; then
-              sed -i 's/^CONFIG_DEFAULT_IOSCHED=.*/CONFIG_DEFAULT_IOSCHED="adios"/' $DEFCONFIG
-            else
-              echo 'CONFIG_DEFAULT_IOSCHED="adios"' >> $DEFCONFIG
-            fi
-            echo "  ADIOS 已设为默认 (choice + CONFIG_DEFAULT_IOSCHED)"
+            echo "  ADIOS choice 已设为默认"
             # 诊断: 打印 gki_defconfig 调度器相关行
             echo "  --- gki_defconfig 调度器 ---"
-            grep -E "IOSCHED|DEFAULT_IOSCHED" $DEFCONFIG | head -5
+            grep -E "IOSCHED" $DEFCONFIG | head -5
           else
             echo "  !! CONFIG_MQ_IOSCHED_DEFAULT_ADIOS Kconfig 未声明 (adios 补丁可能未生效)"
           fi
