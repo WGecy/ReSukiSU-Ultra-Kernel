@@ -698,6 +698,7 @@ class Builder:
                       "CONFIG_IP_SET_HASH_NETPORTNET=y", "CONFIG_IP_SET_LIST_SET=y",
                       "CONFIG_NETFILTER_XT_SET=y",
                       "CONFIG_MQ_IOSCHED_ADIOS=y", "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y",
+                      "CONFIG_MQ_IOSCHED_SSG=y",
                       ]
         frag = self.kernel_root / "common" / "arch" / "arm64" / "configs" / "tesla.fragment"
         frag.write_text("\n".join(frag_lines) + "\n")
@@ -735,6 +736,10 @@ class Builder:
         if features.get("adios"):
             add_cfg(["CONFIG_MQ_IOSCHED_ADIOS=y", "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y"])
             Log.ok("ADIOS defconfig: 默认 IO 调度器 = ADIOS")
+        if features.get("ssg"):
+            # SSG IO 调度器 (Samsung) — 不开 SSG_CGROUP (6.6 无 cpd_init_fn, ratio=0 降速)
+            add_cfg(["CONFIG_MQ_IOSCHED_SSG=y"])
+            Log.ok("SSG defconfig: SSG IO 调度器 (可选切换, 不设默认)")
         if features.get("bbr3"):
             # 全开拥塞控制算法 (T-677 同款), 含 TCP_CONG_BBR3 供 DEFAULT_BBR3 选择
             add_cfg([f"CONFIG_TCP_CONG_{c}=y" for c in
@@ -913,11 +918,15 @@ class Builder:
                         '\tlockdep_assert_held(&q->sysfs_lock);\n'
                         '\n'
                         '#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
-                        '\t/* Tesla: adios 为默认调度器, 防止 vendor 模块 (cpq 等) 切换走 */\n'
-                        '\tif (q->elevator && new_e && strcmp(new_e->elevator_name, "adios") != 0 &&\n'
-                        '\t    q->elevator->type && strcmp(q->elevator->type->elevator_name, "adios") == 0) {\n'
-                        '\t\tpr_info("tesla: 拒绝切换调度器 adios -> %s (保持 adios)\\n",\n'
-                        '\t\t\tnew_e->elevator_name);\n'
+                        '\t/* Tesla: adios/ssg 白名单, 防止 vendor 模块 (cpq 等) 切换走 */\n'
+                        '\tif (q->elevator && new_e &&\n'
+                        '\t    strcmp(new_e->elevator_name, "adios") != 0 &&\n'
+                        '\t    strcmp(new_e->elevator_name, "ssg") != 0 &&\n'
+                        '\t    q->elevator->type &&\n'
+                        '\t    (strcmp(q->elevator->type->elevator_name, "adios") == 0 ||\n'
+                        '\t     strcmp(q->elevator->type->elevator_name, "ssg") == 0)) {\n'
+                        '\t\tpr_info("tesla: 拒绝切换调度器 %s -> %s (保持 adios/ssg)\\n",\n'
+                        '\t\t\tq->elevator->type->elevator_name, new_e->elevator_name);\n'
                         '\t\treturn 0;\n'
                         '\t}\n'
                         '#endif\n')
@@ -1074,7 +1083,8 @@ class Builder:
                        "CONFIG_IP_SET_HASH_NETNET=y", "CONFIG_IP_SET_HASH_NETPORT=y",
                        "CONFIG_IP_SET_HASH_NETPORTNET=y", "CONFIG_IP_SET_LIST_SET=y",
                        "CONFIG_NETFILTER_XT_SET=y",
-                       "CONFIG_MQ_IOSCHED_ADIOS=y", "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y",
+                      "CONFIG_MQ_IOSCHED_ADIOS=y", "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y",
+                      "CONFIG_MQ_IOSCHED_SSG=y",
                        ]
         if frag.exists():
             content = frag.read_text()

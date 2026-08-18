@@ -28,6 +28,7 @@ FEATURE_PATCHES = {
     "mthp":            "03-mm/08-mthp.patch",
     "lru_gen_export":  "03-mm/16-lru-gen-export.patch",
     "ufs_fastdiscard": "04-block-io/07-ufs-fastdiscard.patch",
+    "ssg":             "04-block-io/15-ssg.patch",
     "zstd":            "04-block-io/zstd-1.5.7.patch",
     "bbr3":            "05-net/06-bbrv3.patch",
     "cpuidle":         "07-drivers/09-cpuidle.patch",

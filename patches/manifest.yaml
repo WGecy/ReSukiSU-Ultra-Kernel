@@ -92,6 +92,11 @@ patches:
   stage: 4
   desc: ADIOS IO 调度器 (OKI 6.6.118 移植)
   status: on-device
+- id: io/ssg
+  file: 04-block-io/15-ssg.patch
+  stage: 4
+  desc: SSG IO 调度器 (Samsung, 可选切换; 不开 SSG_CGROUP 因 6.6 无 cpd_init_fn)
+  status: on-device
 - id: io/ufs-fastdiscard
   file: 04-block-io/07-ufs-fastdiscard.patch
   stage: 4
