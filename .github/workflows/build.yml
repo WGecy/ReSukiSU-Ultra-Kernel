@@ -254,9 +254,6 @@ jobs:
                       break
               else:
                   failed.append("elevator_get_default 锚点未匹配")
-              if old2 in txt:
-                  txt = txt.replace(old2, new2, 1)
-                  changed.append("elevator_switch 保护")
           open(ev, 'w').write(txt)
           for c in changed:
               print("已注入:", c)
