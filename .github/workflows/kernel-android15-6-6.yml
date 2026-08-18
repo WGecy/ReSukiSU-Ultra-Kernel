@@ -111,11 +111,22 @@ jobs:
         run: ls -la dist/ || echo "dist 为空"
 
       - name: 删除旧合并 Release
-        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete kernel-latest --repo ${{ github.repository }} --yes 2>/dev/null || true
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/kernel-latest" 2>/dev/null || true
-          sleep 5
+          REPO="${{ github.repository }}"
+          # 删除 release + tag (带重试, 确保彻底删掉)
+          for i in 1 2 3; do
+            gh release delete kernel-latest --repo "$REPO" --yes --cleanup-tag 2>&1 || echo "  release 删除(第$i次): 不存在或失败"
+            gh api -X DELETE "repos/$REPO/git/refs/tags/kernel-latest" 2>&1 || echo "  tag 删除(第$i次): 不存在或失败"
+            # 验证 tag 已删除
+            if ! gh api "repos/$REPO/git/refs/tags/kernel-latest" >/dev/null 2>&1; then
+              echo "  tag kernel-latest 已彻底删除"
+              break
+            fi
+            sleep 5
+          done
+          sleep 3
 
       - name: 发布合并 Release
         env:
