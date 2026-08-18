@@ -38,29 +38,14 @@ on:
         required: false
         type: string
         default: "main"
-      version:
+      custom_suffix:
         required: false
         type: string
+        default: ""
       build_time:
         required: false
         type: string
         default: "N"
-      enable_susfs:
-        required: false
-        type: boolean
-        default: true
-      use_bbg:
-        required: false
-        type: boolean
-        default: false
-      use_zram:
-        required: false
-        type: boolean
-        default: true
-      cve_2026_43499_patch:
-        required: false
-        type: boolean
-        default: true
 
 jobs:
   build-kernel:
@@ -175,7 +160,6 @@ jobs:
 
       # ==================== 应用 SUSFS (gitlab 上游) ====================
       - name: 应用 SUSFS
-        if: ${{ inputs.enable_susfs }}
         run: |
           set -e
           cd build/repo
@@ -223,9 +207,9 @@ jobs:
           from patches import apply_all
           cfg = yaml.safe_load(open('config.yaml'))
           # 依据输入覆盖 features
-          cfg['features']['bbg'] = ${{ inputs.use_bbg && 'True' || 'False' }}
-          cfg['features']['zram_lz4kd'] = ${{ inputs.use_zram && 'True' || 'False' }}
-          cfg['features']['cve_fix'] = ${{ inputs.cve_2026_43499_patch && 'True' || 'False' }}
+          cfg['features']['bbg'] = False
+          cfg['features']['zram_lz4kd'] = True
+          cfg['features']['cve_fix'] = True
           cfg['features']['lts_fixes'] = False
           cfg['build']['lts_merge'] = False
           apply_all(cfg, Path('build/repo'), sublevel='${{ inputs.sub_level }}', kernel_base='${{ inputs.kernel_version }}.${{ inputs.sub_level }}')
@@ -255,7 +239,6 @@ jobs:
           grep -c "MGLRU FORCE3" "$VS" || true
 
       - name: 应用 CVE 修复
-        if: ${{ inputs.cve_2026_43499_patch }}
         working-directory: build/repo/common
         run: |
           ACTUAL_SUB=$(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')
@@ -339,7 +322,7 @@ jobs:
           fi
 
           # ===== zram (内建 + lz4kd 默认 + 算法, 参考 GKI_KernelSU_SUSFS) =====
-          if [ "${{ inputs.use_zram }}" == "true" ]; then
+          if true; then
             enable_config_if_defined CONFIG_ZRAM
             enable_config_if_defined CONFIG_ZSMALLOC
             # 默认压缩 lz4kd (choice 原位替换)
@@ -356,7 +339,7 @@ jobs:
           fi
 
           # SUSFS 配置 (参考 GKI_KernelSU_SUSFS)
-          if [ "${{ inputs.enable_susfs }}" == "true" ]; then
+          if true; then
             cat >> $DEFCONFIG << 'SUSFS_EOF'
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -464,6 +447,27 @@ jobs:
             echo "BLKDEV_DEFAULT_RQ → 256"
           fi
 
+      # ==================== 配置内核名称 (参考 GKI_KernelSU_SUSFS: -android15-8-gHASH-BID) ====================
+      - name: 配置内核名称
+        working-directory: build/repo
+        run: |
+          set -e
+          # 自定义后缀优先, 否则默认 android15-8-gHASH-abBID
+          BID="ab$((RANDOM % 90000000 + 10000000))"
+          GHASH=$(git -C common rev-parse --verify HEAD | cut -c1-13)
+          if [ -n "${{ inputs.custom_suffix }}" ]; then
+            SUFFIX="${{ inputs.custom_suffix }}"
+          else
+            SUFFIX="-android15-8-g${GHASH}-${BID}"
+          fi
+          echo "内核后缀: $SUFFIX"
+          echo "KERNEL_SUFFIX=$SUFFIX" >> $GITHUB_ENV
+          # 6.6+ setlocalversion 注入 (参考仓库 perl, 保留 KERNELVERSION + config_localversion)
+          perl -i -0777 -pe 's/(.*)echo "\$\{KERNELVERSION\}\$\{file_localversion\}\$\{config_localversion\}\$\{LOCALVERSION\}\$\{scm_version\}"/$1echo "\$\{KERNELVERSION\}'"${SUFFIX}"'\$\{config_localversion\}"/s' common/scripts/setlocalversion 2>/dev/null || true
+          # maybe-dirty 修复 (kleaf 可复现构建)
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+          echo "内核名称配置完成: 6.6.x${SUFFIX}"
+
       - name: 编译内核
         run: |
           set -e
@@ -498,4 +502,5 @@ jobs:
           name: kernel-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-${{ inputs.android_version }}
           path: out/*.zip
           if-no-files-found: error
+          compression-level: 0
 

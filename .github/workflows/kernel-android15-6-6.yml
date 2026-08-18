@@ -19,26 +19,16 @@ on:
           - "6.6.77"
           - "6.6.118"
         default: "all"
-      enable_susfs:
-        description: "启用 SUSFS"
+      ksu_branch:
+        description: "KSU 分支 (默认 main)"
         required: false
-        type: boolean
-        default: true
-      use_zram:
-        description: "启用 ZRAM 增强 (lz4kd)"
+        type: string
+        default: "main"
+      custom_suffix:
+        description: "自定义内核后缀 (可选, 如 -test-01, 留空用默认 android15-8-gHASH-abBID)"
         required: false
-        type: boolean
-        default: true
-      use_bbg:
-        description: "启用 BBG 防格机"
-        required: false
-        type: boolean
-        default: false
-      cve_2026_43499_patch:
-        description: "应用 CVE-2026-43499 rtmutex 修复链"
-        required: false
-        type: boolean
-        default: true
+        type: string
+        default: ""
       build_time:
         description: "自定义构建时间 (N或留空=当前UTC)"
         required: false
@@ -86,13 +76,9 @@ jobs:
       kernel_version: "6.6"
       sub_level: ${{ matrix.sub_level }}
       os_patch_level: ${{ matrix.os_patch_level }}
-      ksu_branch: "main"
-      version: ${{ inputs.version || '' }}
+      ksu_branch: ${{ inputs.ksu_branch }}
+      custom_suffix: ${{ inputs.custom_suffix }}
       build_time: ${{ inputs.build_time }}
-      enable_susfs: ${{ inputs.enable_susfs }}
-      use_zram: ${{ inputs.use_zram }}
-      use_bbg: ${{ inputs.use_bbg }}
-      cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
 
   # ==================== 拉取管理器 APK ====================
   get-ksu-manager:
@@ -140,7 +126,7 @@ jobs:
             if gh release create kernel-latest dist/* \
               --repo ${{ github.repository }} \
               --title "ReSukiSU-Ultra-Kernel (6.6.77 + 6.6.118 + 管理器)" \
-              --notes "自动构建 (ReSukiSU-Ultra 分支)\n- 6.6.77 (2025-03)\n- 6.6.118 (2026-01)\n- ReSukiSU-Ultra 管理器 APK"; then
+              --notes "自动构建 (ReSukiSU-Ultra 分支)\n- 6.6.77 (2025-03)\n- 6.6.118 (2026-01)\n- ReSukiSU-Ultra 管理器 APK\n自定义后缀: ${{ inputs.custom_suffix || '无' }}"; then
               echo "合并 Release 发布成功: kernel-latest"
               exit 0
             fi
