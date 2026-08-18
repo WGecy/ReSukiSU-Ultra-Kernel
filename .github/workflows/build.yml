@@ -227,6 +227,65 @@ jobs:
             echo "功能补丁应用完整 (无 .rej 冲突)"
           fi
 
+      # ==================== 强制 ADIOS 默认 (elevator.c 拦截, 防 init.qti 切 cpq) ====================
+      - name: 强制 ADIOS 默认 (elevator.c 拦截)
+        run: |
+          set -e
+          EV=build/repo/common/block/elevator.c
+          test -f "$EV" || { echo "::error::elevator.c 不存在"; exit 1; }
+          python3 - "$EV" << 'EOF'
+          import sys
+          ev = sys.argv[1]
+          txt = open(ev).read()
+          changed = []
+          failed = []
+          seg = txt.split("elevator_get_default")[1][:400] if "elevator_get_default" in txt else ""
+          if "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS" not in seg:
+              for old in ('\treturn elevator_find_get(q, "mq-deadline");',
+                          'return elevator_find_get(q, "mq-deadline");'):
+                  if old in txt:
+                      new = ('#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
+                             '\treturn elevator_find_get(q, "adios");\n'
+                             '#else\n'
+                             '\treturn elevator_find_get(q, "mq-deadline");\n'
+                             '#endif')
+                      txt = txt.replace(old, new, 1)
+                      changed.append("elevator_get_default -> adios")
+                      break
+              else:
+                  failed.append("elevator_get_default 锚点未匹配")
+          if "tesla: 拒绝切换调度器" not in txt:
+              old2 = 'int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n{\n\tint ret;\n\n\tlockdep_assert_held(&q->sysfs_lock);\n'
+              new2 = ('int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n'
+                      '{\n'
+                      '\tint ret;\n'
+                      '\n'
+                      '\tlockdep_assert_held(&q->sysfs_lock);\n'
+                      '\n'
+                      '#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
+                      '\t/* Tesla: adios 为默认调度器, 防止 vendor 模块 (cpq 等) 切换走 */\n'
+                      '\tif (q->elevator && new_e && strcmp(new_e->elevator_name, "adios") != 0 &&\n'
+                      '\t    q->elevator->type && strcmp(q->elevator->type->elevator_name, "adios") == 0) {\n'
+                      '\t\tpr_info("tesla: 拒绝切换调度器 adios -> %s (保持 adios)\n",\n'
+                      '\t\t\tnew_e->elevator_name);\n'
+                      '\t\treturn 0;\n'
+                      '\t}\n'
+                      '#endif\n')
+              if old2 in txt:
+                  txt = txt.replace(old2, new2, 1)
+                  changed.append("elevator_switch 保护")
+              else:
+                  failed.append("elevator_switch 锚点未匹配")
+          open(ev, 'w').write(txt)
+          for c in changed:
+              print("已注入:", c)
+          if failed:
+              for f in failed:
+                  print("::warning::" + f)
+              exit(1)
+          print("elevator.c: ADIOS 强制完成 (默认 adios + 切换保护)")
+          EOF
+
       # ==================== MGLRU 强制全开 (FORCE3, 防 init.rc 关闭) ====================
       - name: 强制 MGLRU (vmscan FORCE3)
         run: |
@@ -304,7 +363,12 @@ jobs:
             sed -i 's/^CONFIG_MQ_IOSCHED_DEFAULT_[A-Z0-9_]*=y$/CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y/' $DEFCONFIG
             grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
             # 格式2: 字符串 (CONFIG_DEFAULT_IOSCHED="...") → "adios"
-            sed -i 's/^CONFIG_DEFAULT_IOSCHED=.*/CONFIG_DEFAULT_IOSCHED="adios"/' $DEFCONFIG
+            # 关键: DEFAULT_IOSCHED 是独立字符串 config, 不随 choice 自动写 defconfig → 必须显式追加
+            if grep -q '^CONFIG_DEFAULT_IOSCHED=' $DEFCONFIG; then
+              sed -i 's/^CONFIG_DEFAULT_IOSCHED=.*/CONFIG_DEFAULT_IOSCHED="adios"/' $DEFCONFIG
+            else
+              echo 'CONFIG_DEFAULT_IOSCHED="adios"' >> $DEFCONFIG
+            fi
             echo "  ADIOS 已设为默认 (choice + CONFIG_DEFAULT_IOSCHED)"
             # 诊断: 打印 gki_defconfig 调度器相关行
             echo "  --- gki_defconfig 调度器 ---"
