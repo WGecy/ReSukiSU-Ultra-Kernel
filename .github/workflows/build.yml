@@ -81,14 +81,13 @@ jobs:
 
       - name: 安装编译依赖
         run: |
-          # 精简包 + 超时重试 (避免 apt 卡死); runner 自带 Java 17/git/curl
-          sudo apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 || echo "apt update 失败(忽略)"
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
-            build-essential libssl-dev bison flex libelf-dev dwarves \
-            ccache python3-venv zip unzip bc kmod cpio jq \
-            || sudo apt-get install -y --no-install-recommends \
-            build-essential libssl-dev bison flex libelf-dev dwarves \
-            ccache python3-venv zip unzip bc kmod cpio jq
+          # 换源: azure.archive.ubuntu.com CDN 偶发卡死 → archive.ubuntu.com
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+          # 参考 GKI_KernelSU_SUSFS: 精简 9 包 (runner 自带 Java 17/git/curl/zip/unzip/bc/cpio/jq)
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y ccache python3 python3-venv python3-yaml git curl \
+            build-essential libssl-dev bison flex libelf-dev dwarves
 
       # ==================== bazel 磁盘缓存 (提速关键, 参考 GKI_KernelSU_SUSFS) ====================
       - name: 恢复 bazel 磁盘缓存
