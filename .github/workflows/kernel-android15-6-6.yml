@@ -133,11 +133,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
+          # 按实际构建的版本生成标题/描述
+          case "${{ inputs.version }}" in
+            "6.6.77")
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.77 + 管理器)"
+              REL_VERSIONS="6.6.77 (2025-03)"
+              ;;
+            "6.6.118")
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.118 + 管理器)"
+              REL_VERSIONS="6.6.118 (2026-01)"
+              ;;
+            *)
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.77 + 6.6.118 + 管理器)"
+              REL_VERSIONS="$(printf '6.6.77 (2025-03)\n6.6.118 (2026-01)')"
+              ;;
+          esac
+          REL_SUFFIX="${{ inputs.custom_suffix || '无' }}"
+          printf -v REL_NOTES '自动构建 (ReSukiSU-Ultra 分支)\n- %s\n- ReSukiSU-Ultra 管理器 APK\n自定义后缀: %s' "$REL_VERSIONS" "$REL_SUFFIX"
           for i in 1 2 3 4 5; do
             if gh release create kernel-latest dist/* \
               --repo ${{ github.repository }} \
-              --title "ReSukiSU-Ultra-Kernel (6.6.77 + 6.6.118 + 管理器)" \
-              --notes "自动构建 (ReSukiSU-Ultra 分支)\n- 6.6.77 (2025-03)\n- 6.6.118 (2026-01)\n- ReSukiSU-Ultra 管理器 APK\n自定义后缀: ${{ inputs.custom_suffix || '无' }}"; then
+              --title "$REL_TITLE" \
+              --notes "$REL_NOTES"; then
               echo "合并 Release 发布成功: kernel-latest"
               exit 0
             fi
