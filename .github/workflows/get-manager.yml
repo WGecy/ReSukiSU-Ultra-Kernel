@@ -15,7 +15,10 @@ jobs:
     steps:
       - name: 安装依赖
         run: |
-          sudo apt-get update
+          # 换源: azure.archive.ubuntu.com CDN 偶发卡死 → archive.ubuntu.com
+          sudo sed -i 's|azure\\.archive\\.ubuntu\\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo apt-get install -y curl jq
 
       - name: 下载管理器 APK (ReSukiSU-Ultra 最新 release)
