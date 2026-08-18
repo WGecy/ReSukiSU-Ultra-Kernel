@@ -25,8 +25,14 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p manager
-          # 固定 tag + 固定名直连 (无需 API 不触发限流, prerelease 也适用)
-          curl -sL "https://github.com/pengzenzen-creator/ReSukiSU-Ultra/releases/download/v4.3.0-latest/ReSukiSU-Ultra-universal.apk" -o manager/ReSukiSU-Ultra-universal.apk
+          # 一个版本一个 tag: 用 API 拿最新 release 的 tag (按创建时间, 含 prerelease)
+          LATEST_TAG=$(curl -s "https://api.github.com/repos/pengzenzen-creator/ReSukiSU-Ultra/releases?per_page=1" | jq -r '.[0].tag_name')
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            echo "::warning::无法获取最新 release, 跳过"
+            exit 0
+          fi
+          echo "最新管理器版本: $LATEST_TAG"
+          curl -sL "https://github.com/pengzenzen-creator/ReSukiSU-Ultra/releases/download/${LATEST_TAG}/ReSukiSU-Ultra-universal.apk" -o manager/ReSukiSU-Ultra-universal.apk
           ls -la manager/
           # 校验是否真的下载到 (404 页面会是一个小文件)
           SIZE=$(stat -c %s manager/ReSukiSU-Ultra-universal.apk)
