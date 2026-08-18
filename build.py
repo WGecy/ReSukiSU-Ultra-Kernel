@@ -893,7 +893,7 @@ class Builder:
                 Log.ok("mm/Makefile: tesla_vm_opt.o 已挂载")
         # ===== adios 默认调度器固化 (elevator.c) =====
         # 1) elevator_get_default: CONFIG_MQ_IOSCHED_DEFAULT_ADIOS → 默认 adios
-        # 2) elevator_switch: 防止 vendor 模块 (cpq) 把 adios 切走
+        # 2) elevator_switch: 拦截已禁用 (2026-08-18, 管理器 IO 调度器切换功能需要自由切换)
         ev = common / "block" / "elevator.c"
         if ev.exists():
             txt = ev.read_text()
@@ -908,31 +908,6 @@ class Builder:
                 if old in txt:
                     txt = txt.replace(old, new, 1)
                     Log.ok("elevator.c: 默认调度器 → adios")
-            # switch 保护
-            if "tesla: 拒绝切换调度器" not in txt:
-                old2 = 'int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n{\n\tint ret;\n\n\tlockdep_assert_held(&q->sysfs_lock);\n'
-                new2 = ('int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n'
-                        '{\n'
-                        '\tint ret;\n'
-                        '\n'
-                        '\tlockdep_assert_held(&q->sysfs_lock);\n'
-                        '\n'
-                        '#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
-                        '\t/* Tesla: adios/ssg 白名单, 防止 vendor 模块 (cpq 等) 切换走 */\n'
-                        '\tif (q->elevator && new_e &&\n'
-                        '\t    strcmp(new_e->elevator_name, "adios") != 0 &&\n'
-                        '\t    strcmp(new_e->elevator_name, "ssg") != 0 &&\n'
-                        '\t    q->elevator->type &&\n'
-                        '\t    (strcmp(q->elevator->type->elevator_name, "adios") == 0 ||\n'
-                        '\t     strcmp(q->elevator->type->elevator_name, "ssg") == 0)) {\n'
-                        '\t\tpr_info("tesla: 拒绝切换调度器 %s -> %s (保持 adios/ssg)\\n",\n'
-                        '\t\t\tq->elevator->type->elevator_name, new_e->elevator_name);\n'
-                        '\t\treturn 0;\n'
-                        '\t}\n'
-                        '#endif\n')
-                if old2 in txt:
-                    txt = txt.replace(old2, new2, 1)
-                    Log.ok("elevator.c: adios 切换保护已加")
             ev.write_text(txt)
         # ===== MGLRU 强制开启固化 =====
         # init.rc 会写 /sys/kernel/mm/lru_gen/enabled 0 (关闭), 这里拦截
