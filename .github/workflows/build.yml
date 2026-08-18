@@ -254,27 +254,6 @@ jobs:
                       break
               else:
                   failed.append("elevator_get_default 锚点未匹配")
-          # switch 保护: 仅拦 cpq (OnePlus 厂商 init 开机默认写 cpq 覆盖固化值)
-          if "tesla: 拒绝切换调度器" not in txt:
-              old2 = 'int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n{\n\tint ret;\n\n\tlockdep_assert_held(&q->sysfs_lock);\n'
-              new2 = ('int elevator_switch(struct request_queue *q, struct elevator_type *new_e)\n'
-                      '{\n'
-                      '\tint ret;\n'
-                      '\n'
-                      '\tlockdep_assert_held(&q->sysfs_lock);\n'
-                      '\n'
-                      '#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n'
-                      '\t/* Tesla: 仅拦 cpq (厂商 init 开机写入), 其余调度器自由切换 */\n'
-                      '\tif (q->elevator && new_e &&\n'
-                      '\t    strcmp(new_e->elevator_name, "cpq") == 0) {\n'
-                      '\t\tpr_info("tesla: 拒绝切换调度器 %s -> cpq\\n",\n'
-                      '\t\t\tq->elevator->type->elevator_name);\n'
-                      '\t\treturn 0;\n'
-                      '\t}\n'
-                      '#endif\n')
-              if old2 in txt:
-                  txt = txt.replace(old2, new2, 1)
-                  changed.append("elevator_switch cpq 拦截")
           open(ev, 'w').write(txt)
           for c in changed:
               print("已注入:", c)
