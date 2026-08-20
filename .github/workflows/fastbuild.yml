@@ -107,8 +107,10 @@ jobs:
         id: ccache-restore
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}
+          # key 带时间戳: 每次构建生成新 key, 避免命中旧空缓存后不更新
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
+            ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-
             ${{ env.CCACHE_KEY }}-${{ runner.os }}-
             ${{ env.CCACHE_KEY }}-
 
@@ -484,11 +486,23 @@ jobs:
 
       # ==================== 保存 ccache 缓存 ====================
       - name: 保存 ccache 缓存
-        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        # 总是保存 (不能用 cache-hit 条件: 命中空缓存会导致永不更新)
+        if: always()
+        run: |
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}"
+          echo "ccache 目录大小:"
+          du -sh "${{ env.CCACHE_DIR }}" 2>/dev/null || echo "(目录不存在)"
+          ls "${{ env.CCACHE_DIR }}" 2>/dev/null | head -3
+          echo "确保目录存在:"
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          echo "ok"
+        # 用 shell 步骤确认目录有效后, 再用 cache action 保存
+      - name: 上传 ccache 缓存
+        if: always()
         uses: actions/cache/save@v5
         with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}
+          path: /home/runner/.ccache_6.6.${{ matrix.sub_level }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
 
       # ==================== 上传内核产物 ====================
       - name: 上传内核产物
