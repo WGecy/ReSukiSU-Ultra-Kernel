@@ -35,6 +35,7 @@ FEATURE_PATCHES = {
     "thermal_offset":  "08-thermal/thermal-offset.patch",
     "perf_tune":       "06-tune/performance-tune.patch",
     "vm_defaults":     "06-tune/vm-defaults.patch",
+    "extract_cert_fix": "09-android/extract-cert-fix.patch",
 }
 
 # OS3 时代逆向自建模块 (2026-08-14 退役): OS4 官方已内置/直装, 与官方冲突

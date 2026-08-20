@@ -1,0 +1,556 @@
+name: 内核快速构建 - Android 15 (6.6)
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  TZ: Asia/Shanghai
+  ANDROID_VERSION: 'android15'
+  KERNEL_VERSION: '6.6'
+  SUB_VERSION: '118'
+  CCACHE_KEY: ccache-resukisu-6.6.118
+  CCACHE_MAXSIZE: '4G'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "内核版本 (6.6.77 / 6.6.118 / 全部)"
+        required: true
+        type: choice
+        options:
+          - "all"
+          - "6.6.77"
+          - "6.6.118"
+        default: "all"
+      ksu_branch:
+        description: "KSU 分支 (默认 main)"
+        required: false
+        type: string
+        default: "main"
+      custom_suffix:
+        description: "自定义内核后缀 (可选, 如 -test-01)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  # ==================== 读取版本矩阵 ====================
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Read and Parse 6.6.json Matrix
+        id: set-matrix
+        run: |
+          VERSION_FILTER="${{ inputs.version }}"
+          MATRIX_JSON=$(jq -c '
+            [ .entries[] | { sub_level: (.kernel | split(".") | .[2]), os_patch_level: .date } ]
+          ' ./data/android15/6.6.json)
+
+          if [ "$VERSION_FILTER" != "all" ]; then
+            FILTER_SUB=$(echo "$VERSION_FILTER" | cut -d'.' -f3)
+            MATRIX_JSON=$(echo "$MATRIX_JSON" | jq -c --arg sub "$FILTER_SUB" '[ .[] | select(.sub_level == $sub) ]')
+          fi
+
+          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
+
+  # ==================== 快速构建内核 (make + ccache-ECS) ====================
+  build-kernels-a15-6-6:
+    needs: prepare-matrix
+    name: "6.6.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}-ReSukiSU-Ultra"
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs['prepare-matrix'].outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 构建信息摘要
+        run: |
+          echo "版本: 6.6.${{ matrix.sub_level }} (${{ matrix.os_patch_level }})"
+          echo "KSU 分支: ${{ inputs.ksu_branch }}"
+          echo "CCACHE_KEY: ${{ env.CCACHE_KEY }}"
+          free -h | head -2
+          nproc
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL &
+          sudo apt-get purge -y man-db >/dev/null 2>&1 || true
+          wait || true
+          df -h / | tail -1
+
+      - name: 检出代码仓库
+        uses: actions/checkout@v7
+
+      - name: 安装编译依赖
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends aria2 \
+            binutils python-is-python3 libssl-dev libelf-dev libzstd-dev \
+            bison flex bc cpio zip unzip pahole
+
+      # ==================== 配置 ccache 目录 + 载入缓存 ====================
+      - name: 配置 ccache 目录
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_6.6.${{ matrix.sub_level }}" >> $GITHUB_ENV
+
+      - name: 载入 ccache 缓存
+        uses: actions/cache@v5
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            ${{ env.CCACHE_KEY }}-${{ runner.os }}-
+            ${{ env.CCACHE_KEY }}-
+
+      # ==================== 下载内核源码 + 工具链 (aria2c 并行) ====================
+      - name: 初始化源码仓库及工具链
+        run: |
+          set -e
+          rm -rf kernel_workspace
+          mkdir kernel_workspace
+          cd kernel_workspace
+
+          if [ "${{ matrix.sub_level }}" == "77" ]; then
+            SRC_URL="https://android.googlesource.com/kernel/common/+archive/refs/heads/deprecated/android15-6.6-2025-03.tar.gz"
+          else
+            SRC_URL="https://android.googlesource.com/kernel/common/+archive/refs/heads/android15-6.6-2026-01.tar.gz"
+          fi
+
+          # 官方源码 (aria2c 多线程) — 仅 common 仓库 (GKI 单仓够用)
+          aria2c -s16 -x16 -k1M "$SRC_URL" -o common.tar.gz || {
+            echo "aria2c 失败, 用 curl 重试"
+            curl -L "$SRC_URL" -o common.tar.gz
+          }
+          mkdir common && tar xzf common.tar.gz -C common
+          rm -f common.tar.gz
+          test -f common/Makefile && echo "common/Makefile OK"
+
+          # clang 工具链 (r510928, cctv18 release — googlesource 无该版本 tar)
+          mkdir -p clang18
+          aria2c -s16 -x16 -k1M \
+            "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip" \
+            -o clang.zip || curl -L \
+            "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip" \
+            -o clang.zip
+          unzip -q clang.zip -d clang18
+          rm -f clang.zip
+          ls clang18/bin/clang && echo "clang OK"
+
+          # ccache-ECS + faketime (本仓库 third_party)
+          mkdir -p ccache-ecs
+          cp ${{ github.workspace }}/third_party/ccache-ecs/* ./ccache-ecs/
+          chmod +x ./ccache-ecs/ccache-x86-64
+          echo "ccache-ECS: $(./ccache-ecs/ccache-x86-64 --version | head -1)"
+
+      # ==================== 初始化 ccache ====================
+      - name: 初始化并配置 ccache
+        run: |
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          mkdir -p "$CCACHE_DIR"
+          CCACHE_BIN="$(pwd)/kernel_workspace/ccache-ecs/ccache-x86-64"
+          echo "CCACHE_BIN=$CCACHE_BIN" >> $GITHUB_ENV
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf" || true
+          echo "ccache 初始状态:"
+          "$CCACHE_BIN" -s | head -8
+
+      # ==================== 添加 KernelSU (ReSukiSU-Ultra) ====================
+      - name: 添加 KernelSU (ReSukiSU-Ultra)
+        run: |
+          set -e
+          mkdir -p build/repo
+          git clone --depth 1 -b ${{ inputs.ksu_branch }} \
+            https://github.com/pengzenzen-creator/ReSukiSU-Ultra build/repo/KernelSU
+          echo "KSU commit: $(git -C build/repo/KernelSU rev-parse --short HEAD)"
+
+          cd kernel_workspace/common/drivers
+          ln -sf "$(realpath --relative-to=. ../../build/repo/KernelSU/kernel)" kernelsu
+          grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
+          grep -q "drivers/kernelsu/Kconfig" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
+          echo "KernelSU 集成完成"
+
+          # seccomp PF_EXITING 兼容修复 (6.6.118+)
+          APP_PROFILE="../../../build/repo/KernelSU/kernel/policy/app_profile.c"
+          if [ -f "$APP_PROFILE" ] && grep -q "KERNEL_VERSION(6, 11, 0)" "$APP_PROFILE"; then
+            sed -i 's/KERNEL_VERSION(6, 11, 0)/KERNEL_VERSION(6, 6, 118)/' "$APP_PROFILE"
+            echo "PF_EXITING 兼容修复已注入"
+          fi
+
+      # ==================== 应用 SUSFS ====================
+      - name: 应用 SUSFS
+        run: |
+          set -e
+          cd kernel_workspace
+          git clone --depth 1 -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} \
+            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu || true
+          if [ ! -d susfs4ksu ]; then
+            echo "::error::SUSFS 克隆失败"
+            exit 1
+          fi
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+          cp -r susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cd common
+          patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+
+          # 6.6 上下文修复
+          if grep -q 'SUSFS_IS_INODE_SUS_MAP\|susfs_is_current_proc_umounted\|SUSFS_IS_INODE_OPEN_REDIRECT' fs/proc/base.c && ! grep -qF 'susfs_def.h' fs/proc/base.c; then
+            grep -qF '#include <linux/dma-buf.h>' fs/proc/base.c || sed -i '/#include <linux/cpufreq_times.h>/a #include <linux/dma-buf.h>' fs/proc/base.c
+            sed -i '/#include <linux/dma-buf.h>/a #endif' fs/proc/base.c
+            sed -i '/#include <linux/dma-buf.h>/a #include <linux/susfs_def.h>' fs/proc/base.c
+            sed -i '/#include <linux/dma-buf.h>/a #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)' fs/proc/base.c
+          fi
+          if grep -q 'SUSFS_IS_INODE_SUS_MAP' mm/memory.c && ! grep -qF 'susfs_def.h' mm/memory.c; then
+            grep -qF '#include <linux/zswap.h>' mm/memory.c && sed -i '/#include <linux/zswap.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n#include <linux/susfs_def.h>\n#endif' mm/memory.c || sed -i '/#include <linux/sched/sysctl.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n#include <linux/susfs_def.h>\n#endif' mm/memory.c
+          fi
+
+          REJ=$(find . -name "*.rej" 2>/dev/null | wc -l)
+          if [ "$REJ" -gt 0 ]; then
+            echo "::warning::SUSFS $REJ 个 .rej:"
+            find . -name "*.rej" | head -5
+          fi
+
+      # ==================== 应用功能补丁 (patches.py) ====================
+      - name: 应用功能补丁
+        run: |
+          python3 - << 'EOF'
+          import sys, yaml
+          from pathlib import Path
+          sys.path.insert(0, '.')
+          from patches import apply_all
+          cfg = yaml.safe_load(open('config.yaml'))
+          cfg['features']['bbg'] = False
+          cfg['features']['zram_lz4kd'] = True
+          cfg['features']['cve_fix'] = True
+          cfg['features']['lts_fixes'] = False
+          cfg['build']['lts_merge'] = False
+          apply_all(cfg, Path('kernel_workspace'), sublevel='${{ matrix.sub_level }}', kernel_base='${{ env.KERNEL_VERSION }}.${{ matrix.sub_level }}')
+          print('功能补丁应用完成')
+          EOF
+          REJ=$(find kernel_workspace/common -name "*.rej" 2>/dev/null | wc -l)
+          if [ "$REJ" -gt 0 ]; then
+            echo "::error::功能补丁 $REJ 个 .rej:"
+            find kernel_workspace/common -name "*.rej" | head -10
+            exit 1
+          fi
+
+      # ==================== 强制 ADIOS 默认 (elevator.c 拦截) ====================
+      - name: 强制 ADIOS 默认 (elevator.c 拦截)
+        run: |
+          cd kernel_workspace/common
+          EV=block/elevator.c
+          test -f "$EV" || { echo "::error::elevator.c 不存在"; exit 1; }
+          python3 - << 'EOF'
+          ev = "block/elevator.c"
+          txt = open(ev).read()
+          old = '''static struct elevator_type *elevator_get_default(void)
+{
+'''
+          new = '''static struct elevator_type *elevator_get_default(void)
+{
+	/* ReSukiSU-Ultra: 固定 ADIOS (防厂商 init 切 cpq) */
+	if (!strcmp(elevator_name, "adios") || !strcmp(elevator_name, "mq-deadline") || !strcmp(elevator_name, "none"))
+		return elevator_get("adios", false);
+'''
+          if old in txt and "elevator_get(\"adios\"" not in txt:
+              open(ev, "w").write(txt.replace(old, new, 1))
+              print("ADIOS 拦截已注入")
+          else:
+              print("已存在或上下文不符, 跳过")
+          EOF
+
+      # ==================== 强制 MGLRU ====================
+      - name: 强制 MGLRU (vmscan FORCE3)
+        run: |
+          cd kernel_workspace/common
+          python3 - << 'EOF'
+          vms = "mm/vmscan.c"
+          txt = open(vms).read()
+          if "FORCE_MGLRU" not in txt:
+              old = "static int __init init_mglru(void)"
+              new = "static int __init init_mglru(void)\n{\n\t/* ReSukiSU-Ultra: 强制开启 MGLRU */\n\tif (!strcmp(current->comm, \"init\"))\n\t\tlru_gen_change_state(3);\n"
+              if old in txt:
+                  txt = txt.replace(old, new, 1)
+                  txt = txt.replace("int lru_gen_change_state", "int lru_gen_change_state", 1)
+                  open(vms, "w").write(txt)
+                  print("MGLRU FORCE 注入")
+              else:
+                  print("上下文不符")
+          else:
+              print("已存在")
+          EOF
+
+      # ==================== 生成 defconfig + fragment ====================
+      - name: 生成 defconfig + fragment
+        working-directory: kernel_workspace/common
+        run: |
+          set -e
+          DEFCONFIG=arch/arm64/configs/gki_defconfig
+          FRAG=arch/arm64/configs/tesla.fragment
+
+          cp $DEFCONFIG $DEFCONFIG.orig
+
+          enable_config() {
+            local cfg="$1"
+            if grep -q "^${cfg}=y" "$DEFCONFIG"; then
+              echo "  已启用: $cfg"
+            elif grep -q "^# ${cfg} is not set" "$DEFCONFIG"; then
+              sed -i "s/^# ${cfg} is not set$/${cfg}=y/" "$DEFCONFIG"
+              echo "  已切换: $cfg"
+            else
+              echo "${cfg}=y" >> "$DEFCONFIG"
+              echo "  已添加: $cfg"
+            fi
+          }
+
+          config_defined() {
+            local name="${1#CONFIG_}"
+            grep -RqsE --include='Kconfig*' "^[[:space:]]*(menuconfig|config)[[:space:]]+${name}$" .
+          }
+
+          enable_config_if_defined() {
+            local cfg="$1"
+            if config_defined "$cfg"; then
+              enable_config "$cfg"
+            else
+              echo "  跳过 (Kconfig 未声明): $cfg"
+            fi
+          }
+
+          enable_config_if_defined CONFIG_KSU
+          enable_config_if_defined CONFIG_KSU_NETISOLATE
+          enable_config_if_defined CONFIG_KSU_FUSEBPF_FIX
+          for c in CONFIG_IP_SET CONFIG_IP_SET_BITMAP_IP CONFIG_IP_SET_BITMAP_IPMAC CONFIG_IP_SET_BITMAP_PORT CONFIG_IP_SET_HASH_IP CONFIG_IP_SET_HASH_IPMARK CONFIG_IP_SET_HASH_IPPORT CONFIG_IP_SET_HASH_IPPORTIP CONFIG_IP_SET_HASH_IPPORTNET CONFIG_IP_SET_HASH_MAC CONFIG_IP_SET_HASH_NET CONFIG_IP_SET_HASH_NETIFACE CONFIG_IP_SET_HASH_NETNET CONFIG_IP_SET_HASH_NETPORT CONFIG_IP_SET_HASH_NETPORTNET CONFIG_IP_SET_LIST_SET CONFIG_NETFILTER_XT_SET; do
+            enable_config_if_defined $c
+          done
+          enable_config_if_defined CONFIG_MQ_IOSCHED_ADIOS
+          if config_defined CONFIG_MQ_IOSCHED_DEFAULT_ADIOS; then
+            sed -i 's/^CONFIG_MQ_IOSCHED_DEFAULT_[A-Z0-9_]*=y$/CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y/' $DEFCONFIG
+            grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' $DEFCONFIG || echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y' >> $DEFCONFIG
+          fi
+          enable_config_if_defined CONFIG_MQ_IOSCHED_SSG
+          enable_config_if_defined CONFIG_LRU_GEN
+          enable_config_if_defined CONFIG_LRU_GEN_ENABLED
+
+          if config_defined CONFIG_TCP_CONG_BBR3; then
+            for alg in BIC CUBIC WESTWOOD HTCP HSTCP HYBLA VEGAS NV SCALABLE LP VENO YEAH ILLINOIS DCTCP CDG BBR BBR3; do
+              enable_config_if_defined CONFIG_TCP_CONG_$alg
+            done
+            if config_defined CONFIG_DEFAULT_BBR3; then
+              sed -i 's/^CONFIG_DEFAULT_TCP_CONG_[A-Z0-9]*=y$/CONFIG_DEFAULT_BBR3=y/' $DEFCONFIG
+              grep -q '^CONFIG_DEFAULT_BBR3=y' $DEFCONFIG || echo 'CONFIG_DEFAULT_BBR3=y' >> $DEFCONFIG
+            fi
+          fi
+
+          if true; then
+            enable_config_if_defined CONFIG_ZRAM
+            enable_config_if_defined CONFIG_ZSMALLOC
+            if config_defined CONFIG_ZRAM_DEF_COMP_LZ4KD; then
+              sed -i 's/^CONFIG_ZRAM_DEF_COMP_[A-Z0-9]*=y$/CONFIG_ZRAM_DEF_COMP_LZ4KD=y/' $DEFCONFIG
+              grep -q '^CONFIG_ZRAM_DEF_COMP_LZ4KD=y' $DEFCONFIG || echo 'CONFIG_ZRAM_DEF_COMP_LZ4KD=y' >> $DEFCONFIG
+            fi
+            while IFS='=' read -r key val; do
+              case "$key" in CONFIG_*) enable_config_if_defined "$key";; esac
+            done < ${{ github.workspace }}/third_party/zram-stack/zram.config
+          fi
+
+          if true; then
+            cat >> $DEFCONFIG << 'SUSFS_EOF'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          SUSFS_EOF
+          fi
+
+          diff "$DEFCONFIG.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > $FRAG || true
+          echo "fragment 生成: $(wc -l < $FRAG) 项"
+
+      # ==================== KMI 兼容修复 ====================
+      - name: 修复 KMI 兼容性
+        working-directory: kernel_workspace/common
+        run: |
+          # 固件搜索路径 (vendor 固件)
+          FW=drivers/base/firmware_loader/main.c
+          if [ -f "$FW" ] && ! grep -q '"/vendor/firmware_mnt/image"' "$FW"; then
+            sed -i 's|\t"/lib/firmware/updates/" UTS_RELEASE,|\t"/vendor/firmware_mnt/image",\n\t"/vendor/modem_firmware/image",\n\t"/lib/firmware/updates/" UTS_RELEASE,|' "$FW"
+            echo "fw_path[] 已补 vendor"
+          fi
+          # protected modules 禁用
+          sed -i 's/def get_gki_protected_modules_list(arch = None):/def get_gki_protected_modules_list(arch = None):\n    return []/' modules.bzl 2>/dev/null || true
+          # rfkill 保持模块
+          echo "KMI 修复完成"
+
+      # ==================== make 编译 (核心加速) ====================
+      - name: 构建内核 (make + ccache-ECS)
+        run: |
+          set -e
+          WORKDIR="$(pwd)"
+          cd kernel_workspace
+
+          CLANG_DIR="$(pwd)/clang18/bin"
+          export PATH="$CLANG_DIR:$PATH"
+
+          # ccache-ECS + faketime 环境
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="$WORKDIR"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+          export CCACHE_IS_KERNEL_COMPILING="true"
+          export PATH="$(pwd)/ccache-ecs:$PATH"
+          SO_DIR="$(pwd)/ccache-ecs"
+          export FAKESTAT="2025-05-25 12:00:00"
+          export FAKETIME="@2025-05-25 13:00:00"
+          export LD_PRELOAD="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
+
+          # CC/LD 包装器 (ccache + faketime)
+          cd common
+          echo '#!/bin/bash' > cc-wrapper
+          echo 'export LD_PRELOAD="'$SO_DIR'/libfakestat.so '$SO_DIR'/libfaketimeMT.so"' >> cc-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
+          echo 'exec ccache-x86-64 clang "$@"' >> cc-wrapper
+          echo '#!/bin/bash' > ld-wrapper
+          echo 'export LD_PRELOAD="'$SO_DIR'/libfakestat.so '$SO_DIR'/libfaketimeMT.so"' >> ld-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
+          echo 'exec ld.lld "$@"' >> ld-wrapper
+          chmod +x cc-wrapper ld-wrapper
+
+          # extract-cert.c LTS bug 修复 (host 工具)
+          sed -i '/if (key_pass)/i #ifdef USE_PKCS11_ENGINE' certs/extract-cert.c
+          sed -i '/ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");/a #endif' certs/extract-cert.c
+
+          # 配置
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 O=out gki_defconfig
+          # fragment 合并
+          cat arch/arm64/configs/tesla.fragment >> out/.config
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 O=out olddefconfig
+
+          # 编译 (ccache + faketime)
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 O=out \
+            CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld \
+            KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+
+          test -f out/arch/arm64/boot/Image && echo "Image OK"
+          ccache-x86-64 -s | head -10
+          echo "Image: $(stat -c %s out/arch/arm64/boot/Image) bytes"
+
+      # ==================== 打包 AnyKernel3 ====================
+      - name: 打包 AnyKernel3
+        run: |
+          set -e
+          cd kernel_workspace
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 2>/dev/null || git clone https://github.com/cctv18/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          cd AnyKernel3
+          cp ../common/out/arch/arm64/boot/Image ./Image
+          test -f ./Image || { echo "::error::Image 缺失"; exit 1; }
+          if [ "${{ matrix.sub_level }}" == "77" ]; then
+            SUFFIX="6.6.77-2025-03"
+          else
+            SUFFIX="6.6.118-2026-01"
+          fi
+          [ -n "${{ inputs.custom_suffix }}" ] && SUFFIX="${SUFFIX}${{ inputs.custom_suffix }}"
+          AK3_NAME="android15-${SUFFIX}-AnyKernel3.zip"
+          zip -q -r ../$AK3_NAME ./*
+          echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
+          echo "AK3: $AK3_NAME ($(stat -c %s ../$AK3_NAME) bytes)"
+
+      # ==================== 保存 ccache 缓存 ====================
+      - name: 保存 ccache 缓存
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}
+
+      # ==================== 上传内核产物 ====================
+      - name: 上传内核产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-${{ env.KERNEL_VERSION }}.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}-${{ env.ANDROID_VERSION }}
+          path: kernel_workspace/*.zip
+          if-no-files-found: error
+
+  # ==================== 合并发布 ====================
+  publish:
+    needs: [build-kernels-a15-6-6]
+    if: always() && (needs.build-kernels-a15-6-6.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载内核产物
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -la dist/ || echo "dist 为空"
+
+      - name: 删除旧合并 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          for i in 1 2 3; do
+            gh release delete kernel-latest --repo "$REPO" --yes --cleanup-tag 2>&1 || echo "  release 删除: 不存在或失败"
+            gh api -X DELETE "repos/$REPO/git/refs/tags/kernel-latest" 2>&1 || echo "  tag 删除: 不存在或失败"
+            if ! gh api "repos/$REPO/git/refs/tags/kernel-latest" >/dev/null 2>&1; then
+              echo "  tag kernel-latest 已删除"
+              break
+            fi
+            sleep 5
+          done
+          sleep 3
+
+      - name: 发布合并 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          case "${{ inputs.version }}" in
+            "6.6.77")
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.77)"
+              REL_VERSIONS="6.6.77 (2025-03)"
+              ;;
+            "6.6.118")
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.118)"
+              REL_VERSIONS="6.6.118 (2026-01)"
+              ;;
+            *)
+              REL_TITLE="ReSukiSU-Ultra-Kernel (6.6.77 + 6.6.118)"
+              REL_VERSIONS="$(printf '6.6.77 (2025-03)\n6.6.118 (2026-01)')"
+              ;;
+          esac
+          printf -v REL_NOTES '快速构建 (make + ccache-ECS)\n- %s\n自定义后缀: %s' "$REL_VERSIONS" "${{ inputs.custom_suffix || '无' }}"
+          for i in 1 2 3 4 5; do
+            if gh release create kernel-latest dist/* \
+              --repo ${{ github.repository }} \
+              --title "$REL_TITLE" \
+              --notes "$REL_NOTES"; then
+              echo "Release 发布成功: kernel-latest"
+              exit 0
+            fi
+            echo "发布失败(第 $i 次), 重试..."; sleep 10
+          done
+          exit 1
