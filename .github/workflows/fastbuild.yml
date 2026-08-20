@@ -415,9 +415,10 @@ jobs:
           export CCACHE_IS_KERNEL_COMPILING="true"
           export PATH="$(pwd)/ccache-ecs:$PATH"
           SO_DIR="$(pwd)/ccache-ecs"
+          # 注意: faketime/fakestat 只在 cc-wrapper/ld-wrapper 内部生效
+          # (全局 LD_PRELOAD 会劫持 host 工具如 scripts/kconfig/conf 导致卡死)
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
-          export LD_PRELOAD="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
 
           # CC/LD 包装器 (ccache + faketime)
           cd common
