@@ -189,20 +189,13 @@ jobs:
       - name: 应用 SUSFS
         run: |
           set -e
-          # 优先用仓库自带 SUSFS (third_party/susfs4ksu, 版本稳定); gitlab 作 fallback
-          if [ -d ${{ github.workspace }}/third_party/susfs4ksu/kernel_patches ]; then
-            echo "使用仓库自带 SUSFS (third_party/susfs4ksu)"
-            SUSFS_DIR=${{ github.workspace }}/third_party/susfs4ksu
-          else
-            echo "仓库无 SUSFS, 从 gitlab 克隆"
-            cd kernel_workspace
-            git clone --depth 1 -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} \
-              https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu || { echo "::error::SUSFS 克隆失败"; exit 1; }
-            SUSFS_DIR=$(pwd)/susfs4ksu
-          fi
-          cp "$SUSFS_DIR/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch" ./common/
-          cp -r "$SUSFS_DIR/kernel_patches/fs/"* ./common/fs/
-          cp -r "$SUSFS_DIR/kernel_patches/include/linux/"* ./common/include/linux/
+          # SUSFS 持续更新, 始终从 gitlab 上游拉最新
+          cd kernel_workspace
+          git clone --depth 1 -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }} \
+            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu || { echo "::error::SUSFS 克隆失败"; exit 1; }
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+          cp -r susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd common
           patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
 
