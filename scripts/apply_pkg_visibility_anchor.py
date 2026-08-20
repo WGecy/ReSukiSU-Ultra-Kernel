@@ -107,27 +107,19 @@ static bool pkg_vis_should_filter(struct file *file)
 	       pkg_vis_dir_is_android_obb(dentry);
 }
 
-static int pkg_vis_nodeid_eq(struct inode *inode, void *nodeidp)
-{
-	struct fuse_inode *fi = get_fuse_inode(inode);
-
-	return *(u64 *)nodeidp == fi->nodeid;
-}
-
 static bool pkg_vis_hide_dirent(struct file *file, struct fuse_dirent *dirent)
 {
 	struct super_block *sb;
 	struct inode *inode;
 	uid_t owner;
 	bool hide;
-	u64 nodeid = dirent->ino;
 
 	if (pkg_vis_current_allowed())
 		return false;
 
-	/* FUSE: dirent->ino 是 nodeid, 必须用 nodeid 查 inode (ilookup 按 i_ino 会失配) */
+	/* Android sdcard FUSE: dirent->ino == inode->i_ino (真机验证 ino=127703 一致) */
 	sb = file_inode(file)->i_sb;
-	inode = ilookup5(sb, nodeid, pkg_vis_nodeid_eq, &nodeid);
+	inode = ilookup(sb, dirent->ino);
 	if (!inode)
 		return false;
 
