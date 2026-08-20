@@ -252,17 +252,10 @@ jobs:
           python3 - << 'EOF'
           ev = "block/elevator.c"
           txt = open(ev).read()
-          old = '''static struct elevator_type *elevator_get_default(void)
-{
-'''
-          new = '''static struct elevator_type *elevator_get_default(void)
-{
-	/* ReSukiSU-Ultra: 固定 ADIOS (防厂商 init 切 cpq) */
-	if (!strcmp(elevator_name, "adios") || !strcmp(elevator_name, "mq-deadline") || !strcmp(elevator_name, "none"))
-		return elevator_get("adios", false);
-'''
-          if old in txt and "elevator_get(\"adios\"" not in txt:
-              open(ev, "w").write(txt.replace(old, new, 1))
+          anchor = "static struct elevator_type *elevator_get_default(void)\n{\n"
+          inject = "\t/* ReSukiSU-Ultra: fixed ADIOS */\n\tif (!strcmp(elevator_name, \"adios\") || !strcmp(elevator_name, \"mq-deadline\") || !strcmp(elevator_name, \"none\"))\n\t\treturn elevator_get(\"adios\", false);\n"
+          if anchor in txt and "elevator_get(\"adios\"" not in txt:
+              open(ev, "w").write(txt.replace(anchor, anchor + inject, 1))
               print("ADIOS 拦截已注入")
           else:
               print("已存在或上下文不符, 跳过")
