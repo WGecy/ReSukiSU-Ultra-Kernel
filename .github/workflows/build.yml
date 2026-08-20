@@ -176,7 +176,16 @@ jobs:
           cp -r susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd common
-          patch -p1 -F 3 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+          patch -p1 -F 3 -N --batch < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch
+          # 关键验证: SUSFS exec/stat hook 必须打上 (sucompat 依赖)
+          if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+            echo "::error::SUSFS exec.c hook 缺失! su 将不可用"
+            exit 1
+          fi
+          if ! grep -q "ksu_handle_stat" fs/stat.c; then
+            echo "::error::SUSFS stat.c hook 缺失!"
+            exit 1
+          fi
 
           # 6.6 上下文修复 (参考 GKI_KernelSU_SUSFS): 补丁 hunk 失配时补 susfs_def.h
           if grep -q 'SUSFS_IS_INODE_SUS_MAP\|susfs_is_current_proc_umounted\|SUSFS_IS_INODE_OPEN_REDIRECT' fs/proc/base.c && ! grep -qF 'susfs_def.h' fs/proc/base.c; then

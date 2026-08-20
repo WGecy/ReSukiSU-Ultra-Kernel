@@ -197,7 +197,16 @@ jobs:
           cp -r susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cd common
-          patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+          patch -p1 -F 3 -N --batch < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
+          # 关键验证: SUSFS 的 exec.c hook 必须打上 (sucompat exec 拦截依赖)
+          if ! grep -q "ksu_handle_execveat" fs/exec.c; then
+            echo "::error::SUSFS exec.c hook 缺失! su 将不可用"
+            exit 1
+          fi
+          if ! grep -q "ksu_handle_stat" fs/stat.c; then
+            echo "::error::SUSFS stat.c hook 缺失!"
+            exit 1
+          fi
 
           # 6.6 上下文修复
           if grep -q 'SUSFS_IS_INODE_SUS_MAP\|susfs_is_current_proc_umounted\|SUSFS_IS_INODE_OPEN_REDIRECT' fs/proc/base.c && ! grep -qF 'susfs_def.h' fs/proc/base.c; then
@@ -323,6 +332,8 @@ jobs:
           }
 
           enable_config_if_defined CONFIG_KSU
+          # SUSFS 内联 hook (choice: SUSFS/TRACEPOINT/MANUAL 三选一)
+          # 注: SUSFS 提供 sucompat exec 拦截, 与 TRACEPOINT 互斥
           enable_config_if_defined CONFIG_KSU_NETISOLATE
           enable_config_if_defined CONFIG_KSU_FUSEBPF_FIX
           for c in CONFIG_IP_SET CONFIG_IP_SET_BITMAP_IP CONFIG_IP_SET_BITMAP_IPMAC CONFIG_IP_SET_BITMAP_PORT CONFIG_IP_SET_HASH_IP CONFIG_IP_SET_HASH_IPMARK CONFIG_IP_SET_HASH_IPPORT CONFIG_IP_SET_HASH_IPPORTIP CONFIG_IP_SET_HASH_IPPORTNET CONFIG_IP_SET_HASH_MAC CONFIG_IP_SET_HASH_NET CONFIG_IP_SET_HASH_NETIFACE CONFIG_IP_SET_HASH_NETNET CONFIG_IP_SET_HASH_NETPORT CONFIG_IP_SET_HASH_NETPORTNET CONFIG_IP_SET_LIST_SET CONFIG_NETFILTER_XT_SET; do
