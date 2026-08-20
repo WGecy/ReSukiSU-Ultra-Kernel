@@ -173,7 +173,7 @@ jobs:
           echo "KSU commit: $(git -C build/repo/KernelSU rev-parse --short HEAD)"
 
           cd kernel_workspace/common/drivers
-          ln -sf "$(realpath --relative-to=. ../../build/repo/KernelSU/kernel)" kernelsu
+          ln -sf "$(realpath --relative-to=. ../../../build/repo/KernelSU/kernel)" kernelsu
           grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
           grep -q "drivers/kernelsu/Kconfig" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
           echo "KernelSU 集成完成"
