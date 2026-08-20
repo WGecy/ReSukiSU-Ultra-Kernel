@@ -146,9 +146,12 @@ def apply_pkg_visibility(common):
         raise PatchError(f"pkg-visibility 补丁缺失: {p}")
     r = run(f"patch -p1 -F 3 -N --batch < {p}", cwd=common, check=False)
     if r.returncode != 0:
+        rejs = list(Path(common).rglob("*.rej"))
         r2 = run(f"patch -p1 -F 3 -R --dry-run < {p}", cwd=common, check=False)
-        if r2.returncode == 0:
+        if r2.returncode == 0 and not rejs:
             return "已应用, 跳过"
+        for rej in rejs:
+            rej.unlink()
         raise PatchError(f"pkg-visibility 应用失败:\n{r.stderr[-800:]}")
     return "✓"
 

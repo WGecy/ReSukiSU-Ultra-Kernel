@@ -232,6 +232,7 @@ jobs:
           cfg['features']['zram_lz4kd'] = True
           cfg['features']['cve_fix'] = True
           cfg['features']['lts_fixes'] = False
+          cfg['features']['pkg_visibility'] = False
           cfg['build']['lts_merge'] = False
           apply_all(cfg, Path('kernel_workspace'), sublevel='${{ matrix.sub_level }}', kernel_base='${{ env.KERNEL_VERSION }}.${{ matrix.sub_level }}')
           print('功能补丁应用完成')
@@ -242,6 +243,11 @@ jobs:
             find kernel_workspace/common -name "*.rej" | head -10
             exit 1
           fi
+
+      # ==================== pkg-visibility (锚点插入, 兼容任何基线) ====================
+      - name: 应用 pkg-visibility (锚点插入)
+        run: |
+          python3 ${{ github.workspace }}/scripts/apply_pkg_visibility_anchor.py kernel_workspace/common
 
       # ==================== 强制 ADIOS 默认 (elevator.c 拦截) ====================
       - name: 强制 ADIOS 默认 (elevator.c 拦截)
