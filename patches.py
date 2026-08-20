@@ -134,6 +134,24 @@ def apply_fusebpf(common):
     return "✓"
 
 
+def apply_pkg_visibility(common):
+    """FUSE 包目录隔离 (补丁随 KSU 仓库走: build/repo/KernelSU/kernel-patches/pkg-visibility/)
+    堵 /sdcard/Android/data|obb 目录枚举 + /data/data 存在性探测 (DuckDetector 类泄露)"""
+    d = KSU_PATCH_DIR = ROOT / "build" / "repo" / "KernelSU" / "kernel-patches" / "pkg-visibility"
+    if not d.exists():
+        raise PatchError(f"pkg-visibility 补丁目录缺失: {d}")
+    p = d / "pkg-visibility.patch"
+    if not p.exists():
+        raise PatchError(f"pkg-visibility 补丁缺失: {p}")
+    r = run(f"patch -p1 -F 3 -N --batch < {p}", cwd=common, check=False)
+    if r.returncode != 0:
+        r2 = run(f"patch -p1 -F 3 -R --dry-run < {p}", cwd=common, check=False)
+        if r2.returncode == 0:
+            return "已应用, 跳过"
+        raise PatchError(f"pkg-visibility 应用失败:\n{r.stderr[-800:]}")
+    return "✓"
+
+
 def apply_unicode_bypass(common):
     """Unicode 零宽字符绕过 (SUSFS 相关)"""
     p = ROOT / "patches" / "09-android" / "unicode_bypass_fix_6.1+.patch"
@@ -293,6 +311,8 @@ def apply_all(cfg, kernel_root, sublevel="77", kernel_base="6.6.77"):
                 msg = apply_zram_lz4kd(common)
             elif feat == "fusebpf":
                 msg = apply_fusebpf(common)
+            elif feat == "pkg_visibility":
+                msg = apply_pkg_visibility(common)
             elif feat == "unicode_bypass":
                 msg = apply_unicode_bypass(common)
             elif feat == "uksm":

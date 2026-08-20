@@ -182,3 +182,10 @@ patches:
   desc: FUSEBPF 修复 (lookup_revalidate + no-Eexist)
   status: on-device
   special: fusebpf
+- id: android/pkg-visibility
+  file: ''
+  stage: 9
+  desc: 'FUSE 包目录隔离 — 堵 /sdcard/Android/data|obb 目录枚举 + /data/data 存在性探测 (DuckDetector 类泄露)'
+  status: pending
+  special: pkg-visibility
+  note: '补丁随 KSU 仓库走 (kernel-patches/pkg-visibility/); 豁免: root/ksu 域 + 管理器 + ksu root 授权列表 + 系统 uid; 零用户配置' 

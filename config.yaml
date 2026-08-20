@@ -54,6 +54,7 @@ features:
   vm_defaults: true              # vm 参数默认值 (watermark=30/swappiness=100)
 
   # ---- 特殊修复 ----
+  pkg_visibility: true           # FUSE 包目录隔离 (堵 /sdcard/Android/data 枚举 + /data/data 探测; root 授权 app 自动豁免)
   fusebpf: true                  # FUSEBPF 修复 (lookup_revalidate + no-Eexist)
   zram_lz4kd: true               # zram LZ4 补丁栈 (LZ4 1.10/lz4k/lz4kd)
   unicode_bypass: true           # Unicode 零宽字符绕过 (需 SUSFS)
