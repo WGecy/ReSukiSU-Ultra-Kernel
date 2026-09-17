@@ -137,7 +137,7 @@ jobs:
           set -e
           cd build/repo
           # 克隆 ReSukiSU-Ultra 分支
-          git clone --depth 1 https://github.com/pengzenzen-creator/ReSukiSU-Ultra KernelSU
+          git clone --depth 1 https://github.com/WGecy/ReSukiSU-Ultra KernelSU
           cd KernelSU
           git checkout ${{ inputs.ksu_branch }}
           echo "KSU commit: $(git rev-parse --short HEAD)"
@@ -474,8 +474,10 @@ jobs:
           echo "KMI 兼容修复完成"
 
       # ==================== 编译内核 (kleaf bazel, 参考 GKI_KernelSU_SUSFS) ====================
-      - name: 设置构建时间
+      - name: 设置构建时间 (强制写入 init/Makefile)
         run: |
+          set -e
+          cd build/repo
           INPUT_TIME="${{ inputs.build_time }}"
           if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "N" && "$INPUT_TIME" != "n" ]]; then
             DATESTR="$INPUT_TIME"
@@ -483,8 +485,29 @@ jobs:
             DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
           fi
           echo "使用构建时间: $DATESTR"
-          echo "KBUILD_BUILD_TIMESTAMP=$DATESTR" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_VERSION=1" >> $GITHUB_ENV
+          # kleaf 的 build/kernel/_setup_env.sh 会无条件执行:
+          #   export KBUILD_BUILD_TIMESTAMP="$(date -d @${SOURCE_DATE_EPOCH})"
+          # 非 stamp 构建 SOURCE_DATE_EPOCH=0 → 永远 Thu Jan 1 00:00:00 UTC 1970,
+          # 所以只设环境变量无效。这里直接改写 init/Makefile 中生成 UTS_VERSION
+          # 的 build-timestamp 变量 (6.6.77 / 6.6.118 两个版本树结构一致, 幂等可重复执行)。
+          python3 - common/init/Makefile "$DATESTR" << 'PYEOF'
+          import sys
+          mf, datestr = sys.argv[1], sys.argv[2]
+          lines = open(mf).read().splitlines()
+          lines = [l for l in lines if not l.startswith('build-timestamp = ')]
+          out = []
+          inserted = False
+          for l in lines:
+              out.append(l)
+              if not inserted and l.startswith('build-version = '):
+                  out.append('build-timestamp = ' + datestr)
+                  inserted = True
+          if not inserted:
+              raise SystemExit('ERROR: init/Makefile 中 build-version = 锚点未找到')
+          open(mf, 'w').write('\n'.join(out) + '\n')
+          print('已注入: build-timestamp = ' + datestr)
+          PYEOF
+          grep -n '^build-timestamp = ' common/init/Makefile
 
       - name: 内核基础修复 (zram 内建 + nr_requests)
         run: |
